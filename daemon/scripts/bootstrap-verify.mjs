@@ -20,17 +20,15 @@ import { join, relative, extname } from 'path';
 import { execSync } from 'child_process';
 import { createHash } from 'crypto';
 
-// Conditional import for neo4j-driver (may not be installed in all environments)
-let neo4j;
-try {
-  neo4j = (await import('neo4j-driver')).default;
-} catch {
-  // neo4j-driver not available — verification queries will be skipped
-}
+import { createGraphStore } from './lib/graph-store.mjs';
 
 // ── Configuration ──
 
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
+// Bolt/Memgraph EXCISED (EU-migration S2.2): the graph verification queries run
+// over the DynamoDB GraphStore. They are SKIPPED (posture preserved) unless the
+// store is configured (GRAPH_NODES_TABLE + GRAPH_EDGES_TABLE) — mirrors the old
+// "graph client not installed → skip" degrade.
+const GRAPH_CONFIGURED = !!(process.env.GRAPH_NODES_TABLE && process.env.GRAPH_EDGES_TABLE);
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const S3_BUCKET = process.env.S3_BUCKET || 'futurator-ai-website';
 const REGISTRY_TABLE = process.env.REGISTRY_TABLE || 'futurator-project-registry';
@@ -126,11 +124,11 @@ async function runGraphSync(projectId, knowledgeDir, workingDir) {
 // ── Verification Queries ──
 
 /**
- * Run all 5 verification queries against Memgraph.
+ * Run all 5 verification checks against the graph store.
  */
 async function runVerificationQueries(projectId, expectedArticleCount) {
-  if (!neo4j) {
-    log('warn', 'neo4j-driver not available — skipping Memgraph verification queries');
+  if (!GRAPH_CONFIGURED) {
+    log('warn', 'graph store not configured (GRAPH_NODES_TABLE/GRAPH_EDGES_TABLE) — skipping graph verification');
     return {
       nodeCount: { passed: null, value: null, expected: expectedArticleCount, skipped: true },
       edgeCount: { passed: null, value: null, byType: {}, skipped: true },
@@ -142,15 +140,14 @@ async function runVerificationQueries(projectId, expectedArticleCount) {
     };
   }
 
-  const memgraphUser = process.env.MEMGRAPH_USER;
-  const memgraphPassword = process.env.MEMGRAPH_PASSWORD;
-  const driver = memgraphUser
-    ? neo4j.driver(BOLT_URI, neo4j.auth.basic(memgraphUser, memgraphPassword || ''))
-    : neo4j.driver(BOLT_URI);
+  const store = await createGraphStore();
   const results = {
     nodeCount: { passed: false, value: 0, expected: expectedArticleCount },
     edgeCount: { passed: false, value: 0, byType: {} },
-    embeddingCoverage: { passed: false, value: 0, expected: expectedArticleCount },
+    // Embeddings moved to a per-project S3 sidecar (S1.5); node rows carry no
+    // embedding, so coverage is not verifiable here — reported as skipped and
+    // excluded from allPassed.
+    embeddingCoverage: { passed: null, value: null, expected: expectedArticleCount, skipped: true },
     orphanNodes: { passed: false, count: 0, nodes: [] },
     sampleQuery: { passed: false, results: [] },
     allPassed: false,
@@ -158,125 +155,63 @@ async function runVerificationQueries(projectId, expectedArticleCount) {
   };
 
   try {
-    // Query 1: Node count
-    log('info', 'Verification query 1/5: Node count...');
-    const session1 = driver.session();
-    try {
-      const r1 = await session1.run(
-        'MATCH (n:Node {projectId: $projectId}) RETURN count(n) AS nodeCount',
-        { projectId }
-      );
-      const nodeCount = r1.records[0]?.get('nodeCount');
-      results.nodeCount.value = typeof nodeCount?.toNumber === 'function' ? nodeCount.toNumber() : Number(nodeCount);
-      results.nodeCount.passed = results.nodeCount.value === expectedArticleCount;
-      log('info', `Node count: ${results.nodeCount.value} (expected: ${expectedArticleCount})`, {
-        passed: results.nodeCount.passed,
-      });
-    } finally {
-      await session1.close();
+    const nodes = await store.listNodes(projectId);
+    const edges = await store.listEdges(projectId);
+
+    // Check 1: Node count
+    log('info', 'Verification check 1/5: Node count...');
+    results.nodeCount.value = nodes.length;
+    results.nodeCount.passed = results.nodeCount.value === expectedArticleCount;
+    log('info', `Node count: ${results.nodeCount.value} (expected: ${expectedArticleCount})`, {
+      passed: results.nodeCount.passed,
+    });
+
+    // Check 2: Edge count by type
+    log('info', 'Verification check 2/5: Edge count...');
+    let totalEdges = 0;
+    for (const e of edges) {
+      results.edgeCount.byType[e.type] = (results.edgeCount.byType[e.type] ?? 0) + 1;
+      totalEdges += 1;
+    }
+    results.edgeCount.value = totalEdges;
+    results.edgeCount.passed = totalEdges > 0;
+    log('info', `Edge count: ${totalEdges}`, { byType: results.edgeCount.byType, passed: results.edgeCount.passed });
+
+    // Check 3: Embedding coverage — skipped (sidecar, see above)
+    log('info', 'Verification check 3/5: Embedding coverage... (skipped — sidecar)');
+
+    // Check 4: Orphan detection (nodes touched by no edge)
+    log('info', 'Verification check 4/5: Orphan detection...');
+    const connected = new Set();
+    for (const e of edges) { connected.add(e.from); connected.add(e.to); }
+    results.orphanNodes.nodes = nodes.filter((n) => !connected.has(n.nodeId)).map((n) => n.nodeId).slice(0, 50);
+    results.orphanNodes.count = results.orphanNodes.nodes.length;
+    results.orphanNodes.passed = true; // Warning only
+    if (results.orphanNodes.count > 0) {
+      log('warn', `Found ${results.orphanNodes.count} orphan node(s)`, { nodes: results.orphanNodes.nodes.slice(0, 10) });
+    } else {
+      log('info', 'No orphan nodes detected');
     }
 
-    // Query 2: Edge count by type
-    log('info', 'Verification query 2/5: Edge count...');
-    const session2 = driver.session();
-    try {
-      const r2 = await session2.run(
-        'MATCH (n:Node {projectId: $projectId})-[r]->(m:Node) RETURN type(r) AS edgeType, count(r) AS cnt',
-        { projectId }
-      );
-      let totalEdges = 0;
-      for (const record of r2.records) {
-        const edgeType = record.get('edgeType');
-        const cnt = record.get('cnt');
-        const count = typeof cnt?.toNumber === 'function' ? cnt.toNumber() : Number(cnt);
-        results.edgeCount.byType[edgeType] = count;
-        totalEdges += count;
-      }
-      results.edgeCount.value = totalEdges;
-      results.edgeCount.passed = totalEdges > 0;
-      log('info', `Edge count: ${totalEdges}`, { byType: results.edgeCount.byType, passed: results.edgeCount.passed });
-    } finally {
-      await session2.close();
-    }
+    // Check 5: Sample traversal (first 10 edges)
+    log('info', 'Verification check 5/5: Sample traversal...');
+    results.sampleQuery.results = edges.slice(0, 10).map((e) => ({ source: e.from, rel: e.type, target: e.to }));
+    results.sampleQuery.passed = results.sampleQuery.results.length > 0;
+    log('info', `Sample traversal returned ${results.sampleQuery.results.length} result(s)`, {
+      passed: results.sampleQuery.passed,
+    });
 
-    // Query 3: Embedding coverage
-    log('info', 'Verification query 3/5: Embedding coverage...');
-    const session3 = driver.session();
-    try {
-      const r3 = await session3.run(
-        'MATCH (n:Node {projectId: $projectId}) WHERE n.embedding IS NOT NULL RETURN count(n) AS embeddedCount',
-        { projectId }
-      );
-      const embeddedCount = r3.records[0]?.get('embeddedCount');
-      results.embeddingCoverage.value = typeof embeddedCount?.toNumber === 'function' ? embeddedCount.toNumber() : Number(embeddedCount);
-      results.embeddingCoverage.passed = results.embeddingCoverage.value === expectedArticleCount;
-      log('info', `Embedding coverage: ${results.embeddingCoverage.value}/${expectedArticleCount}`, {
-        passed: results.embeddingCoverage.passed,
-      });
-    } finally {
-      await session3.close();
-    }
-
-    // Query 4: Orphan detection
-    log('info', 'Verification query 4/5: Orphan detection...');
-    const session4 = driver.session();
-    try {
-      const r4 = await session4.run(
-        'MATCH (n:Node {projectId: $projectId}) WHERE NOT (n)-[]-() RETURN n.nodeId AS orphanNode LIMIT 50',
-        { projectId }
-      );
-      results.orphanNodes.nodes = r4.records.map(r => r.get('orphanNode'));
-      results.orphanNodes.count = results.orphanNodes.nodes.length;
-      // Orphans are a warning, not a failure (standalone utils are valid)
-      results.orphanNodes.passed = true; // Warning only
-      if (results.orphanNodes.count > 0) {
-        log('warn', `Found ${results.orphanNodes.count} orphan node(s)`, {
-          nodes: results.orphanNodes.nodes.slice(0, 10),
-        });
-      } else {
-        log('info', 'No orphan nodes detected');
-      }
-    } finally {
-      await session4.close();
-    }
-
-    // Query 5: Sample GraphRAG query
-    log('info', 'Verification query 5/5: Sample GraphRAG query...');
-    const session5 = driver.session();
-    try {
-      // Simple graph traversal query (no vector search since embeddings may not be indexed yet)
-      const r5 = await session5.run(
-        `MATCH (n:Node {projectId: $projectId})-[r]->(m:Node {projectId: $projectId})
-         RETURN n.nodeId AS source, type(r) AS rel, m.nodeId AS target
-         LIMIT 10`,
-        { projectId }
-      );
-      results.sampleQuery.results = r5.records.map(r => ({
-        source: r.get('source'),
-        rel: r.get('rel'),
-        target: r.get('target'),
-      }));
-      results.sampleQuery.passed = results.sampleQuery.results.length > 0;
-      log('info', `Sample query returned ${results.sampleQuery.results.length} result(s)`, {
-        passed: results.sampleQuery.passed,
-      });
-    } finally {
-      await session5.close();
-    }
-
-    // Overall pass/fail
+    // Overall pass/fail (embeddingCoverage skipped; orphanNodes warning-only)
     results.allPassed =
       results.nodeCount.passed &&
       results.edgeCount.passed &&
-      results.embeddingCoverage.passed &&
       results.sampleQuery.passed;
-    // orphanNodes is warning-only, does not affect allPassed
 
   } catch (err) {
-    log('error', 'Verification queries failed', { error: err.message });
+    log('error', 'Verification checks failed', { error: err.message });
     results.allPassed = false;
   } finally {
-    await driver.close();
+    await store.close?.();
   }
 
   return results;
@@ -710,12 +645,12 @@ Options:
             console.log(`      ${type}: ${count}`);
           }
         }
-        console.log(`    Embeddings:       ${report.verification.embeddingCoverage.value}/${report.verification.embeddingCoverage.expected} ${report.verification.embeddingCoverage.passed ? 'PASS' : 'FAIL'}`);
+        console.log(`    Embeddings:       ${report.verification.embeddingCoverage.skipped ? 'skipped (S3 sidecar)' : `${report.verification.embeddingCoverage.value}/${report.verification.embeddingCoverage.expected} ${report.verification.embeddingCoverage.passed ? 'PASS' : 'FAIL'}`}`);
         console.log(`    Orphan nodes:     ${report.verification.orphanNodes.count} (warning only)`);
         console.log(`    Sample query:     ${report.verification.sampleQuery.results.length} results ${report.verification.sampleQuery.passed ? 'PASS' : 'FAIL'}`);
         console.log(`    ALL PASSED:       ${report.verification.allPassed ? 'YES' : 'NO'}`);
       } else {
-        console.log('  Verification:       skipped (neo4j-driver not available)');
+        console.log('  Verification:       skipped (graph store not configured)');
       }
       console.log('');
 

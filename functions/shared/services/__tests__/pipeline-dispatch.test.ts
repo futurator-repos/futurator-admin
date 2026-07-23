@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { derivePipelineStage, deriveAppId, deriveRunId } from '../pipeline-dispatch';
+import { derivePipelineStage, deriveAppId, deriveRunId, repoHtmlUrl } from '../pipeline-dispatch';
 import { dispatchPipelineSchema } from '../../schemas/pipeline-dispatch-schema';
 import type { Plan } from '../../types/plan';
 import type { StoryNodeRow, StoryNodeState } from '../../types/plan-spec';
@@ -401,6 +401,20 @@ describe('deriveAppId', () => {
     const id = deriveAppId('x', '123 Weird/Ref!!'); // leading digit + junk
     expect(id).toMatch(/^[a-z][a-z0-9-]*$/);
     expect(id.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe('repoHtmlUrl', () => {
+  it('greenfield — falls back to futurator-repos/<appId>', () => {
+    expect(repoHtmlUrl('pacman-web-9052ef')).toBe(
+      'https://github.com/futurator-repos/pacman-web-9052ef',
+    );
+  });
+
+  it('brownfield — prefers the app’s explicit githubRepoUrl (any org, .git stripped)', () => {
+    expect(repoHtmlUrl('applicator', 'https://github.com/Get-Really-Real/applicator.git')).toBe(
+      'https://github.com/Get-Really-Real/applicator',
+    );
   });
 });
 

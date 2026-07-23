@@ -23,7 +23,7 @@
 
 import { execFile } from 'node:child_process';
 
-const S3_BUCKET = 'futurator-ai-website';
+const S3_BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-knowledge-live-eu';
 const S3_PREFIX = 'knowledge-live';
 const DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
 

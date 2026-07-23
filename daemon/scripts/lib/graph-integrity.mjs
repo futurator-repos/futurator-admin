@@ -17,8 +17,9 @@
  * dead-code detector (2.3) use a different predicate than the orphan invariant
  * (2.2). A dead file appears in dead-code.json and NOT in orphans.json.
  *
- * Pure logic lives here so it can be unit-tested against a FakeSession (no live
- * Memgraph). graph-sync.mjs wires these into the sync flow.
+ * Pure logic lives here so it can be unit-tested against an in-memory GraphStore
+ * (no live Memgraph — S1.4, EU migration: Memgraph/bolt is EXCISED, see
+ * `lib/graph-store.mjs`). graph-sync.mjs wires these into the sync flow.
  */
 
 /**
@@ -77,13 +78,16 @@ export function parentDir(relPath) {
  * MATCH-only on the file node (we never invent file nodes here — that stays the
  * responsibility of the article/AST path), so a file already in the graph gains
  * its structural edge and can never be degree-0. `dir` nodes are cheap and
- * idempotent (`MERGE`); each carries ≥1 outgoing CONTAINS so is itself never an
- * orphan.
+ * idempotent — created once, never re-clobbered on a later run (the old
+ * `coalesce(d.title, $title)` MERGE semantics: a dir node is structural
+ * metadata that doesn't change once seeded); each carries ≥1 outgoing CONTAINS
+ * so is itself never an orphan.
  *
+ * @param {object} store        GraphStore instance (S1.4 — session→store swap)
  * @param {string[]} filePaths  project-relative file paths (e.g. `src/app/x.ts`)
  * @returns {Promise<{dirNodes:number, containsEdges:number}>}
  */
-export async function emitContainmentBackbone(session, projectId, filePaths, today) {
+export async function emitContainmentBackbone(store, projectId, filePaths, today) {
   let dirNodes = 0;
   let containsEdges = 0;
   const seenDirs = new Set();
@@ -95,24 +99,28 @@ export async function emitContainmentBackbone(session, projectId, filePaths, tod
 
     if (!seenDirs.has(dNodeId)) {
       seenDirs.add(dNodeId);
-      await session.run(
-        `MERGE (d:Node {nodeId: $nodeId})
-         SET d.kind = 'dir', d.projectId = $projectId, d.label = $label,
-             d.status = 'active', d.updated = $today,
-             d.title = coalesce(d.title, $title)`,
-        { nodeId: dNodeId, projectId, label: dir, title: dir === '.' ? '/' : dir, today },
-      );
+      const existingDir = await store.getNode(projectId, dNodeId);
+      if (!existingDir) {
+        await store.putNodes(projectId, [
+          {
+            nodeId: dNodeId,
+            kind: 'dir',
+            label: dir,
+            status: 'active',
+            updated: today,
+            title: dir === '.' ? '/' : dir,
+          },
+        ]);
+      }
       dirNodes++;
     }
 
-    const r = await session.run(
-      `MATCH (d:Node {nodeId: $dirId})
-       MATCH (f:Node {nodeId: $fileId, projectId: $projectId})
-       MERGE (d)-[rel:CONTAINS]->(f) SET rel.updated = $today
-       RETURN 1`,
-      { dirId: dNodeId, fileId: fileNodeId, projectId, today },
-    );
-    if (r.records.length > 0) containsEdges++;
+    // MATCH-only on the file node — we never invent file nodes here.
+    const fileNode = await store.getNode(projectId, fileNodeId);
+    if (fileNode) {
+      await store.putEdges(projectId, [{ type: 'CONTAINS', from: dNodeId, to: fileNodeId }]);
+      containsEdges++;
+    }
   }
 
   return { dirNodes, containsEdges };
@@ -171,21 +179,40 @@ export function classifyGenuineOrphans(orphans, opts = {}) {
  * backbone, a code node here should be impossible; a non-`file` survivor means
  * an extractor dropped an edge.
  *
+ * @param {object} store  GraphStore instance (S1.4 — session→store swap)
  * @returns {Promise<{orphans:Array<{id,kind}>, byKind:Object, hardFail:Array}>}
  */
-export async function reportOrphans(session, projectId) {
-  const r = await session.run(
-    `MATCH (n:Node {projectId: $projectId})
-     WHERE NOT (n)--() AND coalesce(n.status,'active') <> 'pruned'
-     RETURN n.nodeId AS id, n.kind AS kind`,
-    { projectId },
-  );
-  const orphans = r.records.map((rec) => ({
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-  }));
+export async function reportOrphans(store, projectId) {
+  const [nodes, edges] = await Promise.all([
+    store.listNodes(projectId),
+    store.listEdges(projectId),
+  ]);
+  const connected = new Set();
+  for (const e of edges) {
+    connected.add(e.from);
+    connected.add(e.to);
+  }
+  const orphans = nodes
+    .filter((n) => (n.status ?? 'active') !== 'pruned' && !connected.has(n.nodeId))
+    .map((n) => ({ id: n.nodeId, kind: n.kind || 'file' }));
   return { orphans, ...classifyOrphans(orphans) };
 }
+
+// Edge types the dead-code query treats as "this file is reachable/reaches
+// something" — mirrors the old undirected Cypher relationship-type list.
+const DEAD_CODE_RELEVANT_TYPES = new Set([
+  'IMPORTS',
+  'CALLS',
+  'READS',
+  'WRITES',
+  'CALLS_SERVICE',
+  'CALLS_ENDPOINT',
+  'HANDLED_BY',
+  'ROUTES',
+]);
+// Subset checked directed-IN in the legacy query — a subset of the above, kept
+// for parity even though it's implied by the undirected check.
+const DEAD_CODE_INBOUND_TYPES = new Set(['IMPORTS', 'CALLS', 'HANDLED_BY', 'ROUTES']);
 
 /**
  * Dead-code detector (PRD §4.2.3b, W2) — a DIFFERENT query from the orphan
@@ -193,21 +220,50 @@ export async function reportOrphans(session, projectId) {
  * it, it imports/reads/writes/calls nothing live, and it defines nothing that
  * is called. Advisory only — dead code is a human decision, never auto-pruned.
  *
+ * @param {object} store  GraphStore instance (S1.4 — session→store swap)
  * @returns {Promise<Array<{id,updated,title}>>}
  */
-export async function reportDeadCode(session, projectId) {
-  const r = await session.run(
-    `MATCH (f:Node {projectId: $projectId, kind: 'file'})
-     WHERE coalesce(f.status,'active') <> 'pruned'
-       AND NOT (f)-[:IMPORTS|CALLS|READS|WRITES|CALLS_SERVICE|CALLS_ENDPOINT|HANDLED_BY|ROUTES]-()
-       AND NOT (:Node)-[:IMPORTS|CALLS|HANDLED_BY|ROUTES]->(f)
-       AND NOT (f)-[:DEFINES]->(:Node)<-[:CALLS]-(:Node)
-     RETURN f.nodeId AS id, f.updated AS updated, f.title AS title`,
-    { projectId },
-  );
-  return r.records.map((rec) => ({
-    id: rec.get('id'),
-    updated: rec.get('updated') ?? null,
-    title: rec.get('title') ?? rec.get('id'),
-  }));
+export async function reportDeadCode(store, projectId) {
+  const [nodes, edges] = await Promise.all([
+    store.listNodes(projectId),
+    store.listEdges(projectId),
+  ]);
+
+  const anyRelevantTouch = new Set(); // node touched (either direction) by a relevant-type edge
+  const inboundRelevant = new Set(); // node that is the target of an inbound-relevant-type edge
+  const definesChildren = new Map(); // fileNodeId -> [childNodeId] via DEFINES
+  const callsTargets = new Set(); // node that is the target of a CALLS edge
+
+  for (const e of edges) {
+    if (DEAD_CODE_RELEVANT_TYPES.has(e.type)) {
+      anyRelevantTouch.add(e.from);
+      anyRelevantTouch.add(e.to);
+    }
+    if (DEAD_CODE_INBOUND_TYPES.has(e.type)) {
+      inboundRelevant.add(e.to);
+    }
+    if (e.type === 'DEFINES') {
+      if (!definesChildren.has(e.from)) definesChildren.set(e.from, []);
+      definesChildren.get(e.from).push(e.to);
+    }
+    if (e.type === 'CALLS') {
+      callsTargets.add(e.to);
+    }
+  }
+
+  const results = [];
+  for (const f of nodes) {
+    if (f.kind !== 'file') continue;
+    if ((f.status ?? 'active') === 'pruned') continue;
+    if (anyRelevantTouch.has(f.nodeId)) continue;
+    if (inboundRelevant.has(f.nodeId)) continue;
+    const children = definesChildren.get(f.nodeId) ?? [];
+    if (children.some((c) => callsTargets.has(c))) continue;
+    results.push({
+      id: f.nodeId,
+      updated: f.updated ?? null,
+      title: f.title ?? f.nodeId,
+    });
+  }
+  return results;
 }

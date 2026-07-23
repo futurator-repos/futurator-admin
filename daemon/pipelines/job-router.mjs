@@ -71,6 +71,10 @@ export const JOB_HANDLER_P3_QA = 'p3-qa';
 // mandatory INTEGRATE-RUN before `review` and the FIRST responder to a blocking
 // QA verdict (before per-symptom fix stories).
 export const JOB_HANDLER_INTEGRATOR = 'integrator';
+// B1 (EU-migration completion plan §4.2) — File Explorer control-job primitive.
+// The daemon lists/reads under a server-scoped root instead of the API Lambda
+// reaching over SSM; see `daemon/pipelines/file-browse.mjs` (B2).
+export const JOB_HANDLER_FILE_BROWSE = 'file-browse';
 
 /**
  * Decide which handler should run a given job.
@@ -112,6 +116,7 @@ export function selectHandler(job) {
   if (job.jobType === 'quick-planspec') return JOB_HANDLER_QUICK_PLANSPEC;
   if (job.jobType === 'p3-qa') return JOB_HANDLER_P3_QA;
   if (job.jobType === 'integrator') return JOB_HANDLER_INTEGRATOR;
+  if (job.jobType === 'file-browse') return JOB_HANDLER_FILE_BROWSE;
   if (job.phase === 'epic-dev') return JOB_HANDLER_EPIC_DEV;
   return JOB_HANDLER_LEGACY;
 }
@@ -127,16 +132,30 @@ export function selectHandler(job) {
  * correct daemon to claim (or to wait until that daemon comes online) — it never
  * occupies a concurrency slot on the wrong host.
  *
+ * B3 (EU-migration completion plan §4.2) — `file-browse` jobs are pinned to
+ * `job.assignedServerId` regardless of `dispatch.serverAware`. With the flag ON
+ * the poller's `assignedServerId-status-index` query already scopes candidates
+ * to this server, so this branch is a no-op there; with the flag OFF the
+ * poller falls back to the global PENDING pool and this is the ONLY thing
+ * stopping a different box's daemon from reading/listing another server's
+ * filesystem. A mismatch leaves the job PENDING for the assigned server's
+ * daemon to claim — it is never dropped.
+ *
  * Defaults: an absent target resolves to 'ec2' (the always-on workhorse and the
- * UI's default runtime), mirroring the API's `input.target ?? 'ec2'`. Non-queue
- * jobs are unaffected — they are claimable by whichever daemon is polling.
+ * UI's default runtime), mirroring the API's `input.target ?? 'ec2'`. Every
+ * other job type is unaffected — they are claimable by whichever daemon is
+ * polling.
  *
  * @param {object} job — the PENDING agent-job row
  * @param {string} daemonSource — this daemon's DAEMON_SOURCE ('ec2' | 'local')
+ * @param {string} [serverId] — this daemon's fleet SERVER_ID (Servers module);
+ *   only consulted for `file-browse` jobs
  * @returns {boolean} true if this daemon may claim the job
  */
-export function isJobClaimableBySource(job, daemonSource) {
-  if (!job || job.jobType !== 'queue-request') return true;
+export function isJobClaimableBySource(job, daemonSource, serverId) {
+  if (!job) return true;
+  if (job.jobType === 'file-browse') return job.assignedServerId === serverId;
+  if (job.jobType !== 'queue-request') return true;
   const target = job.queueRequestPayload?.target || 'ec2';
   return target === daemonSource;
 }
@@ -155,6 +174,24 @@ export function validateQueueRequestJob(job) {
   if (!p || typeof p !== 'object') return { ok: false, reason: 'queueRequestPayload-missing' };
   if (!p.requestId) return { ok: false, reason: 'requestId-missing' };
   if (!p.prompt || !String(p.prompt).trim()) return { ok: false, reason: 'prompt-missing' };
+  return { ok: true };
+}
+
+/**
+ * B1 — structural check for a file-browse job. Rejects malformed rows before
+ * the daemon touches the filesystem. Needs an identity (`jobId`), an `op`
+ * ('list' | 'read'), the `path` to browse, and the `serverId` it is scoped
+ * to. Returns { ok } or { ok:false, reason }.
+ */
+export function validateFileBrowseJob(job) {
+  if (!job || typeof job !== 'object') return { ok: false, reason: 'job-missing' };
+  if (job.jobType !== 'file-browse') return { ok: false, reason: 'jobType-mismatch' };
+  if (!job.jobId) return { ok: false, reason: 'jobId-missing' };
+  const p = job.fileBrowsePayload;
+  if (!p || typeof p !== 'object') return { ok: false, reason: 'fileBrowsePayload-missing' };
+  if (p.op !== 'list' && p.op !== 'read') return { ok: false, reason: 'op-invalid' };
+  if (!p.path || typeof p.path !== 'string') return { ok: false, reason: 'path-missing' };
+  if (!p.serverId) return { ok: false, reason: 'serverId-missing' };
   return { ok: true };
 }
 

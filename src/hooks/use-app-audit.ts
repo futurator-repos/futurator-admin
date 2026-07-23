@@ -110,7 +110,8 @@ export function selectAuditReport(job: AgentJob | undefined | null): AuditReport
 const QK_AUDITS = (appId: string) => ['app-audits', appId] as const;
 
 /** Public S3 home of the file-level code graph the daemon uploads per app. */
-const REFACTOR_GRAPH_S3 = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+const REFACTOR_GRAPH_S3 =
+  'https://futurator-knowledge-live-eu.s3.eu-central-1.amazonaws.com/knowledge-live';
 
 /**
  * Whether a code graph exists for the app (cheap S3 HEAD). Gates the Graph tab

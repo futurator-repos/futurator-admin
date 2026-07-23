@@ -36,7 +36,8 @@ import { api } from '@/lib/api-client';
 import { useReflections, useReflectionDecision } from '@/hooks/use-reflections';
 import { computeCoverage } from '@/lib/graph-insights';
 
-const S3_KNOWLEDGE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+const S3_KNOWLEDGE =
+  'https://futurator-knowledge-live-eu.s3.eu-central-1.amazonaws.com/knowledge-live';
 
 interface ForensicSkills {
   activatedSkills?: Array<{ skill: string; source: string; activationCount: number }>;

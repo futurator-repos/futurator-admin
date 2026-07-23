@@ -2,10 +2,11 @@
  * mcp-config.mjs — wire the Mycelium graph MCP server into agent spawns.
  *
  * The MCP server (`daemon/mcp/mycelium-mcp.mjs`) exposes read-only graph tools
- * (query_graph, get_node, neighbors, blast_radius, god_nodes, orphans,
- * shortest_path). It runs as a stdio subprocess of the agent — ON THE BOX, next
- * to Memgraph (bolt://localhost:7687) — so there is NO VPC/network barrier for
- * agents (that only ever applied to the browser/API).
+ * (query_graph, get_node, neighbors, transitive_reach, get_file_symbols,
+ * list_kind, dependency_subgraph, path_between, god_nodes, orphans,
+ * shortest_path). It runs as a stdio subprocess of the agent and reads the
+ * DynamoDB-backed GraphStore (Story S0.2, KD-1) with the host's per-server IAM
+ * keys — no bolt, no VPC/network barrier, so it boots on ANY fleet host.
  *
  * Gated behind `MYCELIUM_MCP=on` so deploying is a no-op until the operator
  * enables it. When on, `myceliumMcpSpawn` returns the `--mcp-config` arg + (for
@@ -26,7 +27,11 @@ export const MYCELIUM_TOOLS = [
   'query_graph',
   'get_node',
   'neighbors',
-  'blast_radius',
+  'transitive_reach',
+  'get_file_symbols',
+  'list_kind',
+  'dependency_subgraph',
+  'path_between',
   'god_nodes',
   'orphans',
   'shortest_path',
@@ -44,7 +49,14 @@ function ensureConfig() {
       mycelium: {
         command: process.execPath,
         args: [MYCELIUM_MCP_PATH],
-        env: { MEMGRAPH_URI: process.env.MEMGRAPH_URI || 'bolt://localhost:7687' },
+        // GraphStore (S0.2) targets: table names + region for the DynamoDB store.
+        // When these resolve the store hits DynamoDB with the host's IAM keys;
+        // absent, `createGraphStore` degrades to the in-memory store.
+        env: {
+          GRAPH_NODES_TABLE: process.env.GRAPH_NODES_TABLE || 'futurator-graph-nodes',
+          GRAPH_EDGES_TABLE: process.env.GRAPH_EDGES_TABLE || 'futurator-graph-edges',
+          AWS_REGION: process.env.AWS_REGION || 'eu-central-1',
+        },
       },
     },
   };

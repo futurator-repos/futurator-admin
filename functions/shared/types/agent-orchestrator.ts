@@ -505,7 +505,12 @@ export interface AgentJob {
     // gomad/mycelium/…). The API writes a queue-requests row + enqueues this job;
     // the daemon's executeQueueRequestJob spawns `claude -p` and streams the live
     // terminal into agent-events. Payload below (queueRequestPayload).
-    | 'queue-request';
+    | 'queue-request'
+    // B1 — File Explorer control-job primitive. The API enqueues one pinned to
+    // `assignedServerId` (B3); `daemon/pipelines/file-browse.mjs` (B2) lists/reads
+    // under its own FUTURATOR_BROWSE_ROOT and writes back `fileBrowseResult`.
+    // Payload: `fileBrowsePayload` (both below).
+    | 'file-browse';
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
@@ -907,6 +912,49 @@ export interface AgentJob {
     model?: string;
     autoRespond?: boolean;
     callbackUrl?: string;
+  };
+
+  /**
+   * B1 — File Explorer control-job primitive. Set when `jobType ===
+   * 'file-browse'`. Consumed by `daemon/pipelines/file-browse.mjs` (B2), which
+   * lists/reads under a server-scoped root (`FUTURATOR_BROWSE_ROOT`) with
+   * traversal rejection. `GET /api/ec2/files` (op 'list') and `GET
+   * /api/ec2/files/content` (op 'read') enqueue this instead of calling SSM
+   * directly (B4).
+   */
+  fileBrowsePayload?: {
+    op: 'list' | 'read';
+    path: string;
+    serverId: string;
+  };
+
+  /**
+   * Result of a `file-browse` job, denormalized onto the job row so the API
+   * Lambda can relay it in the existing wire shapes without a second read
+   * (B4). `entries` populates the 'list' op — mirrors `FileEntry`
+   * (`src/hooks/use-ec2-files.ts:5-11`). The remaining fields populate the
+   * 'read' op — mirrors `FileContentResponse` (`use-ec2-files.ts:31-43`).
+   */
+  fileBrowseResult?: {
+    op: 'list' | 'read';
+    path: string;
+    /** 'list' op only. */
+    entries?: Array<{
+      name: string;
+      type: 'file' | 'directory';
+      size: number;
+      permissions: string;
+      modified: string;
+    }>;
+    /** 'read' op only. */
+    kind?: 'text' | 'image' | 'pdf' | 'binary';
+    mime?: string;
+    size?: number;
+    mtime?: number;
+    content?: string;
+    base64?: string;
+    tooLarge?: boolean;
+    maxBytes?: number;
   };
 
   // ── Pipeline-3 (development-plan §7) — additive, all optional ──────────────

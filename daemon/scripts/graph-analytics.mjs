@@ -22,6 +22,15 @@
  * reads to size nodes by centrality, color them by community, and list
  * surprising connections.
  *
+ * S1.4 (EU migration): session→store swap. `readProjectGraph`/`writeBackMetrics`
+ * now read/write through the GraphStore (Memgraph/bolt EXCISED, see
+ * `lib/graph-store.mjs`) instead of Cypher. The write-back also now includes
+ * `degree`/`fanIn` (not just `centrality`/`community`) — `degree` feeds the
+ * `centrality-index` GSI's `degree=0` orphans filter, `fanIn` is the plain
+ * in-degree count (S1.4 scope: `lib/graph-integrity.mjs`'s `reportOrphans`
+ * remains the authoritative orphan detector; these are the queryable node-row
+ * mirrors of the same signal).
+ *
  * Pure algorithms are exported for unit testing; graph-sync wires
  * `processGraphAnalytics` into the flow.
  *
@@ -36,29 +45,29 @@ import { detectClusters } from 'ngraph.leiden';
 
 // ── Read the project subgraph (ids + edges) ─────────────────────────────────
 
-async function readProjectGraph(session, projectId) {
-  const nres = await session.run(
-    `MATCH (n:Node {projectId: $projectId})
-     RETURN n.nodeId AS id, coalesce(n.kind, 'file') AS kind,
-            coalesce(n.title, n.nodeId) AS title`,
-    { projectId },
-  );
-  const nodes = nres.records.map((rec) => ({
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-    title: rec.get('title'),
+async function readProjectGraph(store, projectId) {
+  const [nodeRows, edgeRows] = await Promise.all([
+    store.listNodes(projectId),
+    store.listEdges(projectId),
+  ]);
+  const nodes = nodeRows.map((n) => ({
+    id: n.nodeId,
+    kind: n.kind || 'file',
+    title: n.title ?? n.nodeId,
   }));
-  const eres = await session.run(
-    `MATCH (a:Node {projectId: $projectId})-[r]->(b:Node {projectId: $projectId})
-     RETURN a.nodeId AS s, b.nodeId AS t, type(r) AS type`,
-    { projectId },
-  );
-  const edges = eres.records.map((rec) => ({
-    s: rec.get('s'),
-    t: rec.get('t'),
-    type: rec.get('type'),
-  }));
+  const edges = edgeRows.map((e) => ({ s: e.from, t: e.to, type: e.type }));
   return { nodes, edges };
+}
+
+/** Directed in/out edge counts per node id. Pure. */
+function buildDegreeStats(ids, edges) {
+  const outDeg = new Map(ids.map((id) => [id, 0]));
+  const inDeg = new Map(ids.map((id) => [id, 0]));
+  for (const e of edges) {
+    if (outDeg.has(e.s)) outDeg.set(e.s, outDeg.get(e.s) + 1);
+    if (inDeg.has(e.t)) inDeg.set(e.t, inDeg.get(e.t) + 1);
+  }
+  return { outDeg, inDeg };
 }
 
 /** Undirected adjacency map id → Set(neighborId). */
@@ -183,15 +192,21 @@ export function detectCommunities(ids, adj, maxIter = 20) {
   return out;
 }
 
-/** Persist computed metrics back to the graph (best-effort, batched). */
-async function writeBackMetrics(session, metrics) {
-  if (metrics.length === 0) return;
-  await session.run(
-    `UNWIND $rows AS row
-     MATCH (n:Node {nodeId: row.id})
-     SET n.centrality = row.centrality, n.community = row.community`,
-    { rows: metrics.map((m) => ({ id: m.id, centrality: m.centrality, community: m.community })) },
-  );
+/**
+ * Persist computed metrics back onto each node row (best-effort). GraphStore
+ * has no batch-SET primitive (unlike the old `UNWIND ... SET`), so this is a
+ * sequential `setNodeAttrs` per node — still best-effort: the caller wraps the
+ * whole pass in try/catch (graceful degradation, never fails the sync).
+ */
+async function writeBackMetrics(store, projectId, metrics) {
+  for (const m of metrics) {
+    await store.setNodeAttrs(projectId, m.id, {
+      centrality: m.centrality,
+      community: m.community,
+      degree: m.degree,
+      fanIn: m.fanIn,
+    });
+  }
 }
 
 // ── Pure shaping helpers (testable without a session) ───────────────────────
@@ -280,19 +295,20 @@ export function buildInsightsDoc({ projectId, generatedAt, analytics, threshold 
  * god-node / community / surprising lists. Never throws — on any failure it
  * returns an empty, well-formed result (graceful degradation).
  */
-export async function runAnalytics(session, projectId, opts = {}) {
+export async function runAnalytics(store, projectId, opts = {}) {
   const threshold = opts.threshold ?? 0;
   const topN = opts.topN ?? 15;
   const logger = opts.logger;
 
   try {
-    const { nodes, edges } = await readProjectGraph(session, projectId);
+    const { nodes, edges } = await readProjectGraph(store, projectId);
     if (nodes.length === 0) {
       return emptyAnalytics();
     }
     const ids = nodes.map((n) => n.id);
     const adj = buildAdjacency(ids, edges);
     const cb = betweennessCentrality(ids, adj);
+    const { outDeg, inDeg } = buildDegreeStats(ids, edges);
 
     // Communities: Leiden (best quality), with a dependency-free fallback.
     let comm;
@@ -311,11 +327,13 @@ export async function runAnalytics(session, projectId, opts = {}) {
       title: n.title,
       centrality: cb.get(n.id) ?? 0,
       community: comm.get(n.id) ?? null,
+      degree: (outDeg.get(n.id) ?? 0) + (inDeg.get(n.id) ?? 0),
+      fanIn: inDeg.get(n.id) ?? 0,
     }));
     const metricsById = new Map(metrics.map((m) => [m.id, m]));
 
     try {
-      await writeBackMetrics(session, metrics);
+      await writeBackMetrics(store, projectId, metrics);
     } catch (err) {
       logger?.(`analytics write-back skipped (${err.message})`);
     }

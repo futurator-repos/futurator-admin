@@ -13,7 +13,7 @@
 #
 # Requirements on the laptop:
 #   - AWS credentials in the default profile (or AWS_PROFILE set) with DynamoDB
-#     access to the futurator-* tables (region us-east-1).
+#     access to the futurator-* tables (region eu-central-1).
 #   - `claude` CLI on PATH, authenticated (macOS Keychain / Max subscription).
 #     The daemon's OAuth-file check will WARN (macOS keeps creds in the Keychain,
 #     not a file) but the auth probe passes and spawned `claude` uses Keychain.
@@ -29,7 +29,7 @@ cd "$SCRIPT_DIR"
 
 export DAEMON_SOURCE=local
 export DAEMON_QUEUE_ONLY=1
-export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_REGION="${AWS_REGION:-eu-central-1}"
 # Local scratch for each queue run (EC2 uses /home/ubuntu/queue-runs; the API
 # leaves workingDir unset for 'local' targets so the runner falls back here).
 export QUEUE_RUN_ROOT="${QUEUE_RUN_ROOT:-$HOME/futurator-queue-runs}"

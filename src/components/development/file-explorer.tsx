@@ -1,14 +1,12 @@
 'use client';
-import { useState, useCallback, useEffect, createContext, useContext } from 'react';
+import { useState, useCallback, useEffect, useMemo, createContext, useContext } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Trash2, X } from 'lucide-react';
 import { useEc2Files, useDeleteEc2Folder, type FileEntry } from '@/hooks/use-ec2-files';
-import { useEc2Status } from '@/hooks/use-ec2-daemon';
+import { useServers, heartbeatState } from '@/hooks/use-servers';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { FileViewer, type OpenTab } from './file-viewer';
-
-const ROOT_PATH = '/home/ubuntu';
 
 // Lifted tab state — DirectoryNode/FileNode are deeply nested so a context is
 // cleaner than threading callbacks through every level of the tree.
@@ -138,16 +136,16 @@ function DirectoryNode({
   path,
   name,
   depth,
-  ec2Running,
+  serverId,
 }: {
   path: string;
   name: string;
   depth: number;
-  ec2Running: boolean;
+  serverId: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const { data, isLoading, error } = useEc2Files(path, expanded && ec2Running);
+  const { data, isLoading, error } = useEc2Files(serverId, path, expanded);
   const deleteFolder = useDeleteEc2Folder();
   const kind = deletableKind(path);
   const canDelete = kind !== null;
@@ -232,15 +230,10 @@ function DirectoryNode({
                 path={`${path}/${entry.name}`}
                 name={entry.name}
                 depth={depth + 1}
-                ec2Running={ec2Running}
+                serverId={serverId}
               />
             ) : (
-              <FileNode
-                key={entry.name}
-                entry={entry}
-                parentPath={path}
-                depth={depth + 1}
-              />
+              <FileNode key={entry.name} entry={entry} parentPath={path} depth={depth + 1} />
             ),
           )}
           {data?.entries.length === 0 && (
@@ -295,8 +288,8 @@ function DeleteConfirmDialog({
         <p className="text-xs text-muted-foreground">
           {kind === 'project' ? (
             <>
-              This will permanently <code className="font-mono">rm -rf</code> the project on EC2
-              AND its Claude Code transcripts, AND remove related epic records, agent jobs,
+              This will permanently <code className="font-mono">rm -rf</code> the project on EC2 AND
+              its Claude Code transcripts, AND remove related epic records, agent jobs,
               project-registry entries, Labs party-project + session rows, and{' '}
               <code className="font-mono">apps/{projectName}/</code> artifacts in S3. Cannot be
               undone.
@@ -366,9 +359,7 @@ function FileNode({
       onClick={() => openFile(fullPath, entry.name)}
       className={cn(
         'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm transition-colors',
-        isActive
-          ? 'bg-accent text-accent-foreground'
-          : 'hover:bg-accent/50 text-foreground',
+        isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 text-foreground',
       )}
       style={{ paddingLeft: `${depth * 16 + 24}px` }}
     >
@@ -382,18 +373,57 @@ function FileNode({
 
 export function FileExplorer() {
   const searchParams = useSearchParams();
-  const initialPath = searchParams.get('path') || ROOT_PATH;
-  const { data: ec2Status } = useEc2Status(true);
-  const ec2Running = ec2Status?.state === 'running';
+  // No hardcoded root: an empty path lets the daemon default to the selected
+  // server's own scoped browse root, echoed back as `data.path`.
+  const initialPath = searchParams.get('path') || '';
+  const { data: serversData } = useServers();
+  const servers = useMemo(() => serversData?.servers ?? [], [serversData]);
+  // Tick a wall-clock so heartbeat banding stays live between server polls
+  // (matches the Servers-tab card idiom; Date.now() during render is impure).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+
+  // Root-path (tree) + input box. Empty string == the server's scoped browse
+  // root; the daemon echoes the resolved absolute path back in `data.path`,
+  // which we use as the base for child paths and the breadcrumb.
   const [rootPath, setRootPath] = useState(initialPath);
   const [inputPath, setInputPath] = useState(initialPath);
-  const { data, isLoading, error, refetch } = useEc2Files(rootPath, ec2Running);
 
   // Open-tabs state lives at the root so it survives tree expansion/collapse
   // and (intentionally) folder navigation — switching breadcrumb shouldn't
   // wipe what you have open. Keyed by full path; one entry per file.
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
+
+  // Default pick, derived (not stored via an effect): first fresh box,
+  // preferring a local runner. `selectedServerId` only ever holds the
+  // operator's explicit choice; a box that goes merely stale keeps its slot so
+  // the "heartbeat stale" state shows instead of silently jumping away.
+  const defaultServerId = useMemo(() => {
+    const fresh = servers.filter((s) => heartbeatState(s.lastHeartbeatAt, now) === 'fresh');
+    return (fresh.find((s) => s.provider === 'local') ?? fresh[0])?.serverId ?? null;
+  }, [servers, now]);
+  const effectiveServerId =
+    selectedServerId && servers.some((s) => s.serverId === selectedServerId)
+      ? selectedServerId
+      : defaultServerId;
+
+  const selectedServer = servers.find((s) => s.serverId === effectiveServerId) ?? null;
+  const selectedBeat = selectedServer ? heartbeatState(selectedServer.lastHeartbeatAt, now) : null;
+  const canBrowse = selectedBeat === 'fresh';
+  // Only route file calls to a fresh server — the hook's `!!serverId` gate then
+  // keeps the whole tree silent until a live box is picked ("no selection →
+  // zero file calls"). A dead/stale box never fires a request or blocks the UI.
+  const browseServerId = canBrowse ? effectiveServerId : null;
+  const { data, isLoading, error, refetch } = useEc2Files(browseServerId, rootPath, true);
+  // Base for root children + breadcrumb: prefer the daemon-resolved absolute
+  // root so an empty `rootPath` still yields correct child paths.
+  const resolvedRoot = data?.path ?? rootPath;
 
   const openFile = useCallback((path: string, name: string) => {
     setOpenTabs((prev) => {
@@ -425,105 +455,154 @@ export function FileExplorer() {
     setRootPath(inputPath);
   }, [inputPath]);
 
-  if (!ec2Running) {
-    return (
-      <div className="rounded-lg border border-border bg-card p-8 text-center">
-        <p className="text-muted-foreground">EC2 instance is not running.</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Start the instance from the Labs page to browse files.
-        </p>
-      </div>
-    );
-  }
+  // Switching servers re-roots the tree: paths from another box don't map onto
+  // this one, and any open tab would refetch its old path against the new
+  // server. Start clean at the new box's scoped root.
+  const handleSelectServer = useCallback((id: string) => {
+    setSelectedServerId(id);
+    setRootPath('');
+    setInputPath('');
+    setOpenTabs([]);
+    setActivePath(null);
+  }, []);
 
   const activeTab = openTabs.find((t) => t.id === activePath) ?? null;
 
   return (
     <TabsContext.Provider value={{ activePath, openFile }}>
       <div className="space-y-4">
+        {/* Server picker — always visible so a dead/stale box never blocks the
+            panel; the operator can just pick another. */}
         <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={inputPath}
-            onChange={(e) => setInputPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
-            className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm"
-            placeholder="/home/ubuntu"
+          <label className="text-xs font-medium text-muted-foreground">Server</label>
+          <select
+            value={effectiveServerId ?? ''}
+            onChange={(e) => handleSelectServer(e.target.value)}
+            className="rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+          >
+            <option value="" disabled>
+              Pick a server…
+            </option>
+            {servers.map((s) => (
+              <option key={s.serverId} value={s.serverId}>
+                {s.name} · {s.provider} · {heartbeatState(s.lastHeartbeatAt, now)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {!selectedServer ? (
+          <EmptyPanel
+            title="Pick a server"
+            detail="Choose a fleet host above to browse its filesystem."
           />
-          <button
-            onClick={handleNavigate}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium hover:bg-accent/80 transition-colors"
-          >
-            Go
-          </button>
-          <button
-            onClick={() => refetch()}
-            className="rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            ↻
-          </button>
-        </div>
-
-        {/* Split pane: tree (left) + viewer (right). On narrow viewports the
-            viewer drops below; on lg+ they sit side-by-side at ~40/60. */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,2fr)_minmax(420px,3fr)]">
-          {/* ── Tree ── */}
-          <div className="rounded-lg border border-border bg-card">
-            <div className="border-b border-border px-3 py-2">
-              <Breadcrumb
-                path={rootPath}
-                onNavigate={(p) => {
-                  setRootPath(p);
-                  setInputPath(p);
-                }}
+        ) : !canBrowse ? (
+          <EmptyPanel
+            title="Heartbeat stale"
+            detail={`${selectedServer.name} hasn't reported in recently, so its filesystem can't be browsed. Pick a fresh server or wait for it to recover.`}
+          />
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={inputPath}
+                onChange={(e) => setInputPath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
+                className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm"
+                placeholder="server root"
               />
+              <button
+                onClick={handleNavigate}
+                className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium hover:bg-accent/80 transition-colors"
+              >
+                Go
+              </button>
+              <button
+                onClick={() => refetch()}
+                className="rounded-md border border-border px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+              >
+                ↻
+              </button>
             </div>
-            <div className="h-[calc(100vh-260px)] overflow-y-auto">
-              {isLoading && <RootSkeleton />}
-              {error && <div className="p-4 text-sm text-red-400">{(error as Error).message}</div>}
-              {data?.entries.map((entry) =>
-                entry.type === 'directory' ? (
-                  <DirectoryNode
-                    key={entry.name}
-                    path={`${rootPath}/${entry.name}`}
-                    name={entry.name}
-                    depth={0}
-                    ec2Running={ec2Running}
-                  />
-                ) : (
-                  <FileNode
-                    key={entry.name}
-                    entry={entry}
-                    parentPath={rootPath}
-                    depth={0}
-                  />
-                ),
-              )}
-              {data && data.entries.length === 0 && (
-                <div className="p-4 text-sm text-muted-foreground italic">Empty directory</div>
-              )}
-            </div>
-          </div>
 
-          {/* ── Viewer pane ── */}
-          <div className="flex h-[calc(100vh-260px)] min-h-0 flex-col rounded-lg border border-border bg-card">
-            <ViewerTabs
-              tabs={openTabs}
-              activePath={activePath}
-              onSelect={setActivePath}
-              onClose={closeTab}
-            />
-            <div className="min-h-0 flex-1 overflow-hidden">
-              {activeTab ? (
-                <FileViewer key={activeTab.id} tab={activeTab} />
-              ) : (
-                <EmptyViewerState />
-              )}
+            {/* Split pane: tree (left) + viewer (right). On narrow viewports the
+                viewer drops below; on lg+ they sit side-by-side at ~40/60. */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,2fr)_minmax(420px,3fr)]">
+              {/* ── Tree ── */}
+              <div className="rounded-lg border border-border bg-card">
+                <div className="border-b border-border px-3 py-2">
+                  <Breadcrumb
+                    path={resolvedRoot}
+                    onNavigate={(p) => {
+                      setRootPath(p);
+                      setInputPath(p);
+                    }}
+                  />
+                </div>
+                <div className="h-[calc(100vh-260px)] overflow-y-auto">
+                  {isLoading && <RootSkeleton />}
+                  {error && (
+                    <div className="p-4 text-sm text-red-400">{(error as Error).message}</div>
+                  )}
+                  {data?.entries.map((entry) =>
+                    entry.type === 'directory' ? (
+                      <DirectoryNode
+                        key={entry.name}
+                        path={`${resolvedRoot}/${entry.name}`}
+                        name={entry.name}
+                        depth={0}
+                        serverId={selectedServer.serverId}
+                      />
+                    ) : (
+                      <FileNode
+                        key={entry.name}
+                        entry={entry}
+                        parentPath={resolvedRoot}
+                        depth={0}
+                      />
+                    ),
+                  )}
+                  {data && data.entries.length === 0 && (
+                    <div className="p-4 text-sm text-muted-foreground italic">Empty directory</div>
+                  )}
+                </div>
+              </div>
+
+              {/* ── Viewer pane ── */}
+              <div className="flex h-[calc(100vh-260px)] min-h-0 flex-col rounded-lg border border-border bg-card">
+                <ViewerTabs
+                  tabs={openTabs}
+                  activePath={activePath}
+                  onSelect={setActivePath}
+                  onClose={closeTab}
+                />
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {activeTab ? (
+                    <FileViewer
+                      key={activeTab.id}
+                      tab={activeTab}
+                      serverId={selectedServer.serverId}
+                    />
+                  ) : (
+                    <EmptyViewerState />
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </TabsContext.Provider>
+  );
+}
+
+function EmptyPanel({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-8 text-center">
+      <p className="text-muted-foreground">{title}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@
  * Follows the same 3-step COMPILE pattern as story compilation:
  *   1. Shell step: extract document metadata
  *   2. Agent step: Knowledge Compiler creates/updates wiki articles
- *   3. Shell step: embed via Voyage AI + sync to Memgraph + impact propagation
+ *   3. Shell step: embed via Voyage AI + sync to the graph store + impact propagation
  *
  * Usage:
  *   import { getPredevCompileSteps } from './predev-compile-pipeline.mjs';
@@ -18,7 +18,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import neo4j from 'neo4j-driver';
+import { createGraphStore } from '../scripts/lib/graph-store.mjs';
 
 // ── Agent-to-Article-Type Mapping ──
 
@@ -413,54 +413,53 @@ export function computeImpactScore(edgeWeight, hops) {
   return { score: Math.round(score * 1000) / 1000, severity };
 }
 
+/** Forward-propagation edge types (heir of the `INFORMS|ENABLES|DERIVED_FROM` path). */
+const PROPAGATION_EDGE_TYPES = ['INFORMS', 'ENABLES', 'DERIVED_FROM'];
+
 /**
  * Run impact propagation after a node update.
- * Queries Memgraph for downstream nodes and flags them for review.
+ * Forward-BFS the graph store (≤4 hops) for active downstream nodes and flips
+ * them to `flagged` for review. Bolt/Memgraph EXCISED (EU-migration S2.2): the
+ * reverse-never-hard-delete prune/flag model is a `setNodeAttrs` status flip.
  *
  * @param {string} updatedNodeId - The node that was updated
- * @param {string} projectId - Project identifier
- * @param {import('neo4j-driver').Driver} driver - Neo4j/Memgraph driver
+ * @param {string} projectId - Project identifier (store partition key)
+ * @param {object} store - GraphStore instance
  * @returns {Promise<Array<{ nodeId: string, type: string, title: string, severity: string }>>}
  */
-export async function runImpactPropagation(updatedNodeId, projectId, driver) {
-  const session = driver.session();
+export async function runImpactPropagation(updatedNodeId, projectId, store) {
   const flagged = [];
+  const visited = new Set([updatedNodeId]);
+  let frontier = [updatedNodeId];
 
-  try {
-    const result = await session.run(
-      `MATCH (updated:Node {nodeId: $updatedNodeId, projectId: $projectId})
-       MATCH path = (updated)-[:INFORMS|ENABLES|DERIVED_FROM*1..4]->(downstream:Node)
-       WHERE downstream.status = 'active'
-       RETURN downstream.nodeId AS nodeId,
-              downstream.type AS type,
-              downstream.title AS title,
-              length(path) AS hops`,
-      { updatedNodeId, projectId }
-    );
+  for (let hops = 1; hops <= 4 && frontier.length; hops++) {
+    const next = [];
+    for (const id of frontier) {
+      for (const type of PROPAGATION_EDGE_TYPES) {
+        const edges = await store.outEdges(projectId, id, { type });
+        for (const edge of edges) {
+          const downstreamId = edge.to;
+          if (visited.has(downstreamId)) continue;
+          visited.add(downstreamId);
+          next.push(downstreamId);
 
-    for (const record of result.records) {
-      const nodeId = record.get('nodeId');
-      const type = record.get('type');
-      const title = record.get('title');
-      const hops = typeof record.get('hops') === 'object'
-        ? record.get('hops').toNumber()
-        : record.get('hops');
+          const node = await store.getNode(projectId, downstreamId);
+          if (!node || (node.status ?? 'active') !== 'active') continue;
 
-      const { severity } = computeImpactScore(EDGE_WEIGHTS.DERIVED_FROM, hops);
-
-      if (severity !== 'none') {
-        // Flag the downstream node
-        await session.run(
-          `MATCH (n:Node {nodeId: $nodeId, projectId: $projectId})
-           SET n.status = 'flagged',
-               n.flagReason = 'Upstream node ' + $updatedNodeId + ' was modified (' + $severity + ')'`,
-          { nodeId, projectId, updatedNodeId, severity }
-        );
-        flagged.push({ nodeId, type, title, severity });
+          const { severity } = computeImpactScore(EDGE_WEIGHTS.DERIVED_FROM, hops);
+          if (severity !== 'none') {
+            await store.setNodeAttrs(projectId, downstreamId, { status: 'flagged' });
+            flagged.push({
+              nodeId: downstreamId,
+              type: node.props?.type ?? node.kind ?? '',
+              title: node.title ?? '',
+              severity,
+            });
+          }
+        }
       }
     }
-  } finally {
-    await session.close();
+    frontier = next;
   }
 
   return flagged;
@@ -637,12 +636,11 @@ async function main() {
   console.log(`[predev-compile] Compiled: nodeId=${result.nodeId}, type=${result.articleType}, maturity=${result.maturity.score} (${result.maturity.label})`);
   console.log(`[predev-compile] Article written to: ${result.articlePath}`);
 
-  // If Memgraph is available, run impact propagation
-  const boltUri = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
-  let driver;
+  // Run impact propagation over the graph store (in-memory when GRAPH_*_TABLE
+  // is unset — a no-op cold graph, never fatal).
   try {
-    driver = neo4j.driver(boltUri);
-    const flagged = await runImpactPropagation(result.nodeId, opts.projectId, driver);
+    const store = await createGraphStore();
+    const flagged = await runImpactPropagation(result.nodeId, opts.projectId, store);
     if (flagged.length > 0) {
       console.log(`[predev-compile] Impact propagation flagged ${flagged.length} downstream nodes:`);
       for (const f of flagged) {
@@ -651,10 +649,9 @@ async function main() {
     } else {
       console.log('[predev-compile] No downstream nodes flagged.');
     }
+    await store.close?.();
   } catch (err) {
-    console.warn(`[predev-compile] Memgraph unavailable, skipping impact propagation: ${err.message}`);
-  } finally {
-    if (driver) await driver.close();
+    console.warn(`[predev-compile] graph store unavailable, skipping impact propagation: ${err.message}`);
   }
 }
 

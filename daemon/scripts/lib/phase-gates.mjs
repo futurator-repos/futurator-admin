@@ -16,7 +16,12 @@
  *   node phase-gates.mjs --from <phase> --to <phase> --project <id>
  */
 
-import { createDriver } from './memgraph-driver.mjs';
+import { createGraphStore } from './graph-store.mjs';
+
+/** Read a node field, falling back to the allowlisted `props` bag. */
+function nodeField(node, key) {
+  return node?.[key] ?? node?.props?.[key];
+}
 
 // ── Phase Definitions ──
 
@@ -244,33 +249,28 @@ export function getGateForArticleType(articleType) {
 // ── Gate Check Logic ──
 
 /**
- * Check a single gate requirement against Memgraph.
+ * Check a single gate requirement against the graph store.
  *
  * @param {Object} requirement - Gate requirement rule
  * @param {string} projectId
- * @param {import('neo4j-driver').Session} session - Memgraph session
+ * @param {object} store - GraphStore instance (bolt EXCISED, EU-migration S2.2)
  * @returns {Promise<{ passed: boolean, actual: Object, missingNodes: Array }>}
  */
-async function checkRequirement(requirement, projectId, session) {
+async function checkRequirement(requirement, projectId, store) {
   const { types, minMaturity, minCount, aggregate } = requirement;
 
-  // Query for qualifying nodes
-  const result = await session.run(
-    `MATCH (n:Node {projectId: $projectId, status: 'active'})
-     WHERE n.type IN $types
-     RETURN n.nodeId AS nodeId, n.type AS type, n.title AS title, n.maturity AS maturity
-     ORDER BY n.maturity DESC`,
-    { projectId, types }
-  );
-
-  const nodes = result.records.map(r => ({
-    nodeId: r.get('nodeId'),
-    type: r.get('type'),
-    title: r.get('title'),
-    maturity: typeof r.get('maturity') === 'object'
-      ? r.get('maturity').toNumber()
-      : r.get('maturity') || 0,
-  }));
+  // Active nodes whose type is in the requirement set, ranked by maturity desc.
+  const all = await store.listNodes(projectId);
+  const nodes = all
+    .filter((n) => (n.status ?? 'active') === 'active')
+    .map((n) => ({
+      nodeId: n.nodeId,
+      type: nodeField(n, 'type') ?? n.kind,
+      title: n.title ?? nodeField(n, 'title'),
+      maturity: Number(nodeField(n, 'maturity')) || 0,
+    }))
+    .filter((n) => types.includes(n.type))
+    .sort((a, b) => b.maturity - a.maturity);
 
   // Aggregate check
   if (aggregate === 'avg') {
@@ -336,7 +336,7 @@ async function checkRequirement(requirement, projectId, session) {
  *
  * @param {string} fromPhase - Source phase (e.g., 'planning')
  * @param {string} toPhase - Target phase (e.g., 'solutioning')
- * @param {import('neo4j-driver').Driver} driver - Neo4j/Memgraph driver
+ * @param {object} store - GraphStore instance (bolt EXCISED, EU-migration S2.2)
  * @param {Object} [opts]
  * @param {string} [opts.projectId] - Project identifier (default: first found)
  * @returns {Promise<{
@@ -347,7 +347,7 @@ async function checkRequirement(requirement, projectId, session) {
  *   missing: Array<{ description: string, missingNodes: Array }>
  * }>}
  */
-export async function checkPhaseGate(fromPhase, toPhase, driver, opts = {}) {
+export async function checkPhaseGate(fromPhase, toPhase, store, opts = {}) {
   const requirements = getGateRequirements(fromPhase, toPhase);
 
   if (!requirements) {
@@ -361,31 +361,26 @@ export async function checkPhaseGate(fromPhase, toPhase, driver, opts = {}) {
   }
 
   const projectId = opts.projectId || 'default';
-  const session = driver.session();
   const warnings = [];
   const missing = [];
   let allPassed = true;
 
-  try {
-    for (const req of requirements) {
-      const result = await checkRequirement(req, projectId, session);
+  for (const req of requirements) {
+    const result = await checkRequirement(req, projectId, store);
 
-      if (!result.passed) {
-        allPassed = false;
-        warnings.push({
-          rule: req.description,
-          actual: result.actual,
-          required: { types: req.types, minMaturity: req.minMaturity, minCount: req.minCount || 1 },
-          missingNodes: result.missingNodes,
-        });
-        missing.push({
-          description: req.description,
-          missingNodes: result.missingNodes,
-        });
-      }
+    if (!result.passed) {
+      allPassed = false;
+      warnings.push({
+        rule: req.description,
+        actual: result.actual,
+        required: { types: req.types, minMaturity: req.minMaturity, minCount: req.minCount || 1 },
+        missingNodes: result.missingNodes,
+      });
+      missing.push({
+        description: req.description,
+        missingNodes: result.missingNodes,
+      });
     }
-  } finally {
-    await session.close();
   }
 
   return {
@@ -459,16 +454,16 @@ export function toValidationResults(gateResult) {
 /**
  * Generate a full gate status report for all phase transitions.
  *
- * @param {import('neo4j-driver').Driver} driver
+ * @param {object} store - GraphStore instance
  * @param {Object} opts
  * @param {string} opts.projectId
  * @returns {Promise<Array<{ fromPhase: string, toPhase: string, passed: boolean, warnings: Array }>>}
  */
-export async function fullGateReport(driver, opts = {}) {
+export async function fullGateReport(store, opts = {}) {
   const results = [];
 
   for (const gate of GATE_RULES) {
-    const result = await checkPhaseGate(gate.from, gate.to, driver, opts);
+    const result = await checkPhaseGate(gate.from, gate.to, store, opts);
     results.push(result);
   }
 
@@ -497,12 +492,12 @@ async function main() {
     process.exit(1);
   }
 
-  const driver = createDriver();
+  const store = await createGraphStore();
 
   try {
     if (fullReport) {
       console.log(`[phase-gates] Full gate report for project: ${projectId}\n`);
-      const results = await fullGateReport(driver, { projectId });
+      const results = await fullGateReport(store, { projectId });
 
       for (const result of results) {
         const status = result.passed ? 'PASSED' : 'WARNING';
@@ -514,7 +509,7 @@ async function main() {
       }
     } else {
       console.log(`[phase-gates] Checking gate: ${fromPhase} -> ${toPhase}`);
-      const result = await checkPhaseGate(fromPhase, toPhase, driver, { projectId });
+      const result = await checkPhaseGate(fromPhase, toPhase, store, { projectId });
 
       console.log(formatGateWarning(result));
 
@@ -523,7 +518,7 @@ async function main() {
       }
     }
   } finally {
-    await driver.close();
+    await store.close?.();
   }
 }
 

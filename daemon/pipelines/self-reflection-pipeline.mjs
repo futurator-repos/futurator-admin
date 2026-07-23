@@ -14,71 +14,25 @@
  */
 
 import { resolve, join } from 'path';
-import neo4j from 'neo4j-driver';
+import { createGraphStore } from '../scripts/lib/graph-store.mjs';
 import { readFile, writeFile, mkdir, access, appendFile } from 'fs/promises';
 import { buildAgentConfig } from './lib/role-policy.mjs';
 
-const BOLT_URI = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
+// Bolt/Memgraph EXCISED (EU-migration S2.2). The three health pre-queries are
+// now GraphStore reads (DynamoDB when GRAPH_*_TABLE resolve, else in-memory):
+//   low-maturity = listNodes + status∈{active,flagged} + maturity < 0.6
+//   flagged      = listNodes + status == 'flagged'
+//   prune        = superseded nodes with zero active DEPENDS_ON in-edge (reverse GSI)
 
-// ── Cypher queries ──────────────────────────────────────────────────
+/** Phase ordering for the maturity heatmap (heir of the Cypher CASE ladder). */
+const PHASE_ORDER = {
+  discovery: 1, planning: 2, solutioning: 3, implementation: 4, qa: 5, release: 6, support: 7,
+};
 
-/**
- * Query all nodes with maturity < 0.6, ordered by phase then maturity.
- */
-const LOW_MATURITY_CYPHER = `
-MATCH (n:Node)
-WHERE n.projectId = $projectId
-  AND n.status IN ['active', 'flagged']
-  AND n.maturity < 0.6
-RETURN n.nodeId AS nodeId,
-       n.type AS type,
-       n.phase AS phase,
-       n.title AS title,
-       n.maturity AS maturity,
-       n.status AS status
-ORDER BY
-  CASE n.phase
-    WHEN 'discovery' THEN 1
-    WHEN 'planning' THEN 2
-    WHEN 'solutioning' THEN 3
-    WHEN 'implementation' THEN 4
-    WHEN 'qa' THEN 5
-    WHEN 'release' THEN 6
-    WHEN 'support' THEN 7
-  END ASC,
-  n.maturity ASC
-`;
-
-/**
- * Query all flagged nodes with their flag reasons and missing signals.
- */
-const FLAGGED_NODES_CYPHER = `
-MATCH (n:Node)
-WHERE n.projectId = $projectId
-  AND n.status = 'flagged'
-RETURN n.nodeId AS nodeId,
-       n.type AS type,
-       n.phase AS phase,
-       n.title AS title,
-       n.maturity AS maturity,
-       n.missingSignals AS missingSignals,
-       n.flagReason AS flagReason
-ORDER BY n.phase, n.maturity ASC
-`;
-
-/**
- * Query pruning candidates (superseded nodes with no active dependents).
- */
-const PRUNING_CANDIDATES_CYPHER = `
-MATCH (n:Node)
-WHERE n.status = 'superseded'
-  AND n.projectId = $projectId
-  AND NOT (n)<-[:DEPENDS_ON]-(:Node {status: 'active'})
-RETURN n.nodeId AS nodeId,
-       n.title AS title,
-       n.type AS type
-ORDER BY n.updated ASC
-`;
+/** Read a node field, falling back to the allowlisted `props` bag. */
+function nodeField(node, key) {
+  return node?.[key] ?? node?.props?.[key];
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -102,80 +56,102 @@ async function safeRead(filePath, defaultContent = '(file not found)') {
 }
 
 /**
- * Convert a neo4j integer to a JS number, handling both native and wrapped types.
+ * Coerce a possibly-missing numeric field to a JS number (null/undefined → NaN
+ * so callers can distinguish "no maturity" from 0).
  */
 function toNumber(val) {
-  if (val === null || val === undefined) return 0;
+  if (val === null || val === undefined) return NaN;
   if (typeof val === 'number') return val;
-  if (typeof val === 'object' && val.toNumber) return val.toNumber();
-  return Number(val) || 0;
+  return Number(val);
 }
 
-/**
- * Run a Cypher query against Memgraph and return records as plain objects.
- */
-async function runCypher(driver, cypher, params) {
-  const session = driver.session();
-  try {
-    const result = await session.run(cypher, params);
-    return result.records.map((record) => {
-      const obj = {};
-      for (const key of record.keys) {
-        const val = record.get(key);
-        obj[key] = (typeof val === 'object' && val !== null && val.toNumber) ? val.toNumber() : val;
-      }
-      return obj;
-    });
-  } finally {
-    await session.close();
-  }
+/** Sort by phase order then maturity ascending (heir of the Cypher ORDER BY). */
+function byPhaseThenMaturity(a, b) {
+  const pa = PHASE_ORDER[a.phase] ?? 99;
+  const pb = PHASE_ORDER[b.phase] ?? 99;
+  if (pa !== pb) return pa - pb;
+  return (toNumber(a.maturity) || 0) - (toNumber(b.maturity) || 0);
 }
 
 // ── Pre-query functions ─────────────────────────────────────────────
 
 /**
- * Query Memgraph for all low-maturity nodes.
+ * Query the graph store for all low-maturity nodes (status active/flagged,
+ * maturity < 0.6). Bolt EXCISED — a `listNodes` scan + JS filter/sort.
  *
  * @param {string} projectId - The project to query.
+ * @param {object} [store] - GraphStore (defaults to `createGraphStore()`).
  * @returns {Promise<Array>} Low-maturity node records.
  */
-export async function queryLowMaturityNodes(projectId) {
-  const driver = neo4j.driver(BOLT_URI);
-  try {
-    return await runCypher(driver, LOW_MATURITY_CYPHER, { projectId });
-  } finally {
-    await driver.close();
-  }
+export async function queryLowMaturityNodes(projectId, store) {
+  store = store || (await createGraphStore());
+  const nodes = await store.listNodes(projectId);
+  return nodes
+    .filter((n) => ['active', 'flagged'].includes(n.status ?? 'active'))
+    .map((n) => ({
+      nodeId: n.nodeId,
+      type: nodeField(n, 'type') ?? n.kind,
+      phase: nodeField(n, 'phase'),
+      title: n.title ?? nodeField(n, 'title'),
+      maturity: toNumber(nodeField(n, 'maturity')),
+      status: n.status,
+    }))
+    .filter((r) => Number.isFinite(r.maturity) && r.maturity < 0.6)
+    .sort(byPhaseThenMaturity);
 }
 
 /**
- * Query Memgraph for all flagged nodes.
+ * Query the graph store for all flagged nodes.
  *
  * @param {string} projectId - The project to query.
+ * @param {object} [store] - GraphStore (defaults to `createGraphStore()`).
  * @returns {Promise<Array>} Flagged node records.
  */
-export async function queryFlaggedNodes(projectId) {
-  const driver = neo4j.driver(BOLT_URI);
-  try {
-    return await runCypher(driver, FLAGGED_NODES_CYPHER, { projectId });
-  } finally {
-    await driver.close();
-  }
+export async function queryFlaggedNodes(projectId, store) {
+  store = store || (await createGraphStore());
+  const nodes = await store.listNodes(projectId);
+  return nodes
+    .filter((n) => n.status === 'flagged')
+    .map((n) => ({
+      nodeId: n.nodeId,
+      type: nodeField(n, 'type') ?? n.kind,
+      phase: nodeField(n, 'phase'),
+      title: n.title ?? nodeField(n, 'title'),
+      maturity: toNumber(nodeField(n, 'maturity')),
+      missingSignals: nodeField(n, 'missingSignals'),
+      flagReason: nodeField(n, 'flagReason'),
+    }))
+    .sort(byPhaseThenMaturity);
 }
 
 /**
- * Query Memgraph for pruning candidates.
+ * Query the graph store for pruning candidates: superseded nodes with no active
+ * DEPENDS_ON dependent (reverse GSI in-edge scan).
  *
  * @param {string} projectId - The project to query.
+ * @param {object} [store] - GraphStore (defaults to `createGraphStore()`).
  * @returns {Promise<Array>} Pruning candidate records.
  */
-export async function queryPruningCandidates(projectId) {
-  const driver = neo4j.driver(BOLT_URI);
-  try {
-    return await runCypher(driver, PRUNING_CANDIDATES_CYPHER, { projectId });
-  } finally {
-    await driver.close();
+export async function queryPruningCandidates(projectId, store) {
+  store = store || (await createGraphStore());
+  const nodes = await store.listNodes(projectId);
+  const superseded = nodes.filter((n) => n.status === 'superseded');
+  const candidates = [];
+  for (const n of superseded) {
+    const inEdges = await store.inEdges(projectId, n.nodeId, { type: 'DEPENDS_ON' });
+    let hasActiveDependent = false;
+    for (const e of inEdges) {
+      const dependent = await store.getNode(projectId, e.from);
+      if (dependent && (dependent.status ?? 'active') === 'active') {
+        hasActiveDependent = true;
+        break;
+      }
+    }
+    if (!hasActiveDependent) {
+      candidates.push({ nodeId: n.nodeId, title: n.title ?? nodeField(n, 'title'), type: nodeField(n, 'type') ?? n.kind });
+    }
   }
+  return candidates.sort((a, b) => String(nodeField(a, 'updated') ?? '').localeCompare(String(nodeField(b, 'updated') ?? '')));
 }
 
 // ── Reflection report compilation ───────────────────────────────────
@@ -310,9 +286,9 @@ automatically compiled as a system article:
  *
  * Steps:
  *   1. gather-context — same as conversation pipeline
- *   2. query-low-maturity — Cypher query for maturity < 0.6 nodes
+ *   2. query-low-maturity — graph-store query for maturity < 0.6 nodes
  *   3. read-system-docs — read pending-work.md and debt-registry.md
- *   4. query-flagged — Cypher query for flagged nodes
+ *   4. query-flagged — graph-store query for flagged nodes
  *   5. reflect — agent synthesizes health report
  *   6. compile — compile reflection as system article (via Story 5.4)
  *   7. sync — graph-sync for the new article
@@ -333,77 +309,17 @@ export function getSelfReflectionPipeline(projectId, workingDir, opts = {}) {
   const resolvedDir = resolve(workingDir);
   const knowledgeDir = join(resolvedDir, 'knowledge');
   const graphSearchScript = '/opt/futurator-daemon/scripts/graph-search.mjs';
+  // Deployed module path (mirrors the graph-sync.mjs convention below) — the
+  // shell steps import THIS module's store-backed query fns, so the Cypher→store
+  // translation lives in exactly one place. Bolt/Memgraph EXCISED (S2.2).
+  const selfReflectionModule = '/opt/futurator-daemon/pipelines/self-reflection-pipeline.mjs';
 
-  // Build a Cypher query runner script for the shell step.
-  // We use inline node -e to run Cypher queries via neo4j-driver.
-  const lowMaturityCmd = `node --input-type=module -e "
-import neo4j from 'neo4j-driver';
-const driver = neo4j.driver(process.env.MEMGRAPH_URI || 'bolt://localhost:7687');
-const session = driver.session();
-try {
-  const result = await session.run(\`
-    MATCH (n:Node)
-    WHERE n.projectId = \\$projectId
-      AND n.status IN ['active', 'flagged']
-      AND n.maturity < 0.6
-    RETURN n.nodeId AS nodeId, n.type AS type, n.phase AS phase,
-           n.title AS title, n.maturity AS maturity, n.status AS status
-    ORDER BY
-      CASE n.phase
-        WHEN 'discovery' THEN 1
-        WHEN 'planning' THEN 2
-        WHEN 'solutioning' THEN 3
-        WHEN 'implementation' THEN 4
-        WHEN 'qa' THEN 5
-        WHEN 'release' THEN 6
-        WHEN 'support' THEN 7
-      END ASC,
-      n.maturity ASC
-  \`, { projectId: '${projectId}' });
-  const rows = result.records.map(r => ({
-    nodeId: r.get('nodeId'),
-    type: r.get('type'),
-    phase: r.get('phase'),
-    title: r.get('title'),
-    maturity: typeof r.get('maturity') === 'object' ? r.get('maturity').toNumber() : r.get('maturity'),
-    status: r.get('status'),
-  }));
-  console.log(JSON.stringify(rows, null, 2));
-} finally {
-  await session.close();
-  await driver.close();
-}
-"`;
+  // Build the graph pre-query runners for the shell steps. Inline node -e imports
+  // the exported store-backed query fns; each creates its own GraphStore (DynamoDB
+  // when GRAPH_*_TABLE resolve, else in-memory).
+  const lowMaturityCmd = `node --input-type=module -e "import { queryLowMaturityNodes } from '${selfReflectionModule}'; console.log(JSON.stringify(await queryLowMaturityNodes('${projectId}'), null, 2));"`;
 
-  const flaggedNodesCmd = `node --input-type=module -e "
-import neo4j from 'neo4j-driver';
-const driver = neo4j.driver(process.env.MEMGRAPH_URI || 'bolt://localhost:7687');
-const session = driver.session();
-try {
-  const result = await session.run(\`
-    MATCH (n:Node)
-    WHERE n.projectId = \\$projectId
-      AND n.status = 'flagged'
-    RETURN n.nodeId AS nodeId, n.type AS type, n.phase AS phase,
-           n.title AS title, n.maturity AS maturity,
-           n.missingSignals AS missingSignals, n.flagReason AS flagReason
-    ORDER BY n.phase, n.maturity ASC
-  \`, { projectId: '${projectId}' });
-  const rows = result.records.map(r => ({
-    nodeId: r.get('nodeId'),
-    type: r.get('type'),
-    phase: r.get('phase'),
-    title: r.get('title'),
-    maturity: typeof r.get('maturity') === 'object' ? r.get('maturity').toNumber() : r.get('maturity'),
-    missingSignals: r.get('missingSignals'),
-    flagReason: r.get('flagReason'),
-  }));
-  console.log(JSON.stringify(rows, null, 2));
-} finally {
-  await session.close();
-  await driver.close();
-}
-"`;
+  const flaggedNodesCmd = `node --input-type=module -e "import { queryFlaggedNodes } from '${selfReflectionModule}'; console.log(JSON.stringify(await queryFlaggedNodes('${projectId}'), null, 2));"`;
 
   return {
     id: 'self-reflection',
@@ -435,13 +351,13 @@ try {
         captureAs: 'PROJECT_CONTEXT',
       },
 
-      // Step 2: Query low-maturity nodes from Memgraph
+      // Step 2: Query low-maturity nodes from the graph store
       {
         id: 'query-low-maturity',
         stepType: 'shell',
         command: lowMaturityCmd,
         captureAs: 'LOW_MATURITY_NODES',
-        allowFailure: true, // Continue even if Memgraph is unavailable
+        allowFailure: true, // Continue even if the graph store is unavailable
       },
 
       // Step 3: Read system documents (pending work + tech debt)
@@ -459,7 +375,7 @@ try {
         captureAs: 'SYSTEM_DOCS',
       },
 
-      // Step 4: Query flagged nodes from Memgraph
+      // Step 4: Query flagged nodes from the graph store
       {
         id: 'query-flagged',
         stepType: 'shell',
@@ -503,7 +419,7 @@ if (block) {
         condition: 'NEW_KNOWLEDGE',
       },
 
-      // Step 7: Graph sync (ensure the reflection node is in Memgraph)
+      // Step 7: Graph sync (ensure the reflection node is in the graph store)
       {
         id: 'sync',
         stepType: 'shell',

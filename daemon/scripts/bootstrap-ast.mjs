@@ -21,7 +21,8 @@
  *   node bootstrap-ast.mjs --project <id> --root <dir> --skip-backup
  *
  * Env (inherited by spawned graph-sync.mjs):
- *   MEMGRAPH_URI, MEMGRAPH_USER, MEMGRAPH_PASSWORD, VOYAGE_API_KEY
+ *   GRAPH_NODES_TABLE, GRAPH_EDGES_TABLE, AWS_REGION, VOYAGE_API_KEY
+ *   (bolt/Memgraph EXCISED — EU-migration S2.2)
  *
  * Non-blocking by design: AST extraction failures emit fallback JSON,
  * graph-sync failures are logged but the script exits 0.

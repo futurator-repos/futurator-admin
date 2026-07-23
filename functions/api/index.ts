@@ -34,6 +34,7 @@ import {
   setServerEnabled,
 } from '../shared/services/server-provisioning';
 import type { ComputeServer } from '../shared/types/compute-server';
+import { HEARTBEAT_FRESH_MS } from '../shared/types/compute-server';
 import {
   putProviderCredentials,
   isProviderConfigured,
@@ -253,6 +254,7 @@ import {
   type CleanupStep,
 } from '../shared/services/plan-folder-service';
 import { cleanupAppArtifacts } from '../shared/services/app-artifact-service';
+import { purgeProjectGraph } from '../shared/services/graph-purge';
 // Story 20.4 — admin endpoint for converting brownfield to bare+worktree topology.
 import {
   runConvertPreflight,
@@ -388,6 +390,25 @@ import { buildCohortKey } from '../shared/timer/cohort';
 import { THRESHOLDS } from '../shared/timer/pipeline-timer-thresholds';
 
 const EC2_INSTANCE_ID = process.env.EC2_INSTANCE_ID || 'i-0826d68c316ae97dd';
+
+// S0.4 — EC2-instance-id resolution seam (EU migration, KD-2). The
+// singleton-EC2 model is being retired in favor of the fleet
+// (`futurator-servers`) model: a server's EC2 instance id now comes from
+// its row (`providerRef.instanceId`) instead of the dead-account
+// `EC2_INSTANCE_ID` default above. Only `provider === 'aws'` rows have an
+// EC2 instance id to resolve — other providers (hetzner/oracle/gcp/local)
+// return null.
+//
+// NOTE: `EC2_INSTANCE_ID` itself is NOT removed here and no existing call
+// site is repointed to this seam yet — that lands with SX.2 (power
+// controls, seq-5) and the routes owned by seq-3/4. The const is deleted
+// only once S3.4 (seq-9, last) confirms zero remaining callers.
+export async function resolveAwsInstanceId(serverId: string): Promise<string | null> {
+  const server = await getServerById(serverId);
+  if (!server || server.provider !== 'aws') return null;
+  return server.providerRef?.instanceId ?? null;
+}
+
 const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'eu-central-1' });
 const ssmClient = new SSMClient({ region: process.env.AWS_REGION || 'eu-central-1' });
 const cwClient = new CloudWatchClient({ region: process.env.AWS_REGION || 'eu-central-1' });
@@ -659,10 +680,10 @@ app.post('/api/projects/:id/upload-url', async (c) => {
     throw new ValidationError(`contentType must be one of: ${ALLOWED.join(', ')}`);
   }
 
-  const bucket = process.env.FUTURATOR_PUBLIC_BUCKET;
-  if (!bucket) {
-    throw new AppError('CONFIG_ERROR', 'FUTURATOR_PUBLIC_BUCKET not set', 500);
-  }
+  // KD-3: media now lands in the EU knowledge bucket, not the dead public
+  // homepage bucket (S0.3). The homepage's media/<projectId>/ read base-URL
+  // repoint is a deferred operator follow-up in the homepage repo.
+  const bucket = process.env.FUTURATOR_KNOWLEDGE_BUCKET || 'futurator-knowledge-live-eu';
 
   // Sanitize filename: keep extension, slug the rest, prefix with uuid
   const ext = (filename.match(/\.[^.]+$/)?.[0] || '').toLowerCase();
@@ -2215,20 +2236,19 @@ app.post('/api/plans', async (c) => {
 
   await planRepo.createPlan(plan);
 
-  // Bootstrap the EC2 folder + plan.md. If SSM fails, flip the plan to
-  // archived with an error note — never leave an orphan DDB row pointing at
-  // a non-existent folder.
+  // Bootstrap the EC2 folder + plan.md. This is a legacy SSM path that
+  // targets the dead singleton-EC2 instance post-EU-migration (KD-5); it is
+  // deprecated in favor of POST /api/apps/:appId/plans and will be rewired
+  // onto the control-job primitive in S3.3a. Until then, warn-and-continue
+  // rather than archiving the plan — never let dead infra we no longer
+  // control block plan creation.
   try {
     await bootstrapPlanFolder(plan, [], { sendSsmCommand, waitForSsmOutput });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[Plans] Bootstrap failed for ${plan.planId} (${plan.name}): ${message}`);
-    await planRepo.updatePlanFields(plan.planId, {
-      status: 'archived',
-      description: `Bootstrap failed: ${message}`,
-    });
-    const archived = await planRepo.getPlanById(plan.planId);
-    return c.json({ plan: archived, warning: 'bootstrap-failed' }, 201);
+    console.warn(
+      `[Plans] Bootstrap failed for ${plan.planId} (${plan.name}): ${message} — continuing (non-fatal, KD-5)`,
+    );
   }
 
   return c.json({ plan }, 201);
@@ -2285,16 +2305,16 @@ app.post('/api/plans/from-intent', async (c) => {
   await planRepo.createPlan(plan);
 
   // Bootstrap folder + initial plan.md with just the intent (epics empty).
+  // Legacy SSM path targeting the dead singleton-EC2 instance (KD-5) — same
+  // warn-and-continue downgrade as POST /api/plans above; the PM-plan job
+  // kickoff below no longer waits on this succeeding.
   try {
     await bootstrapPlanFolder(plan, [], { sendSsmCommand, waitForSsmOutput });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[Plans] Bootstrap failed for ${planId}: ${message}`);
-    await planRepo.updatePlanFields(planId, {
-      status: 'archived',
-      description: `Bootstrap failed: ${message}`,
-    });
-    return c.json({ error: { code: 'BOOTSTRAP_FAILED', message } }, 500);
+    console.warn(
+      `[Plans] Bootstrap failed for ${planId}: ${message} — continuing (non-fatal, KD-5)`,
+    );
   }
 
   // Kick off the PM-plan job.
@@ -5512,6 +5532,13 @@ app.delete('/api/epic-workflows/:id', async (c) => {
   }
 
   // 3. Delete S3 deployed artifacts
+  // TODO(KD-3/S0.3 decision gate): left on the old 'futurator-ai-website'
+  // bucket ON PURPOSE — published user apps under apps/<name>/ may still
+  // live there. Do NOT repoint to FUTURATOR_KNOWLEDGE_BUCKET until an
+  // operator confirms where apps/ artifacts actually live post-migration;
+  // repointing the read/delete here without also moving the write path and
+  // IAM grant would either orphan live artifacts or silently no-op deletes
+  // (see eu-migration-implementation-plan.md KD-3 / index.ts:5520,:7039).
   if (appName && epic.deployUrl) {
     try {
       const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
@@ -7032,6 +7059,13 @@ app.delete('/api/ec2/files', async (c) => {
   }
 
   // 3. Delete S3 deployed artifacts at apps/<name>/ (best-effort).
+  // TODO(KD-3/S0.3 decision gate): left on the old 'futurator-ai-website'
+  // bucket ON PURPOSE — published user apps under apps/<name>/ may still
+  // live there. Do NOT repoint to FUTURATOR_KNOWLEDGE_BUCKET until an
+  // operator confirms where apps/ artifacts actually live post-migration;
+  // repointing the read/delete here without also moving the write path and
+  // IAM grant would either orphan live artifacts or silently no-op deletes
+  // (see eu-migration-implementation-plan.md KD-3 / index.ts:5520,:7039).
   try {
     const s3 = new S3Client({ region: process.env.AWS_REGION || 'eu-central-1' });
     const prefix = `apps/${name}/`;
@@ -7158,239 +7192,140 @@ app.delete('/api/ec2/files', async (c) => {
   });
 });
 
-// Defense in depth: every browseable path must live under /home/ubuntu so the
-// SSM-backed file endpoints can never be coerced into reading /etc, /root,
-// instance-metadata mount points, etc. The regex on top of this rejects shell
-// metacharacters and traversal segments.
-const EC2_BROWSE_ROOT = '/home/ubuntu';
+// ── EC2 / fleet File Browser (B4) ──
+//
+// These routes no longer reach the box over SSM. Instead they enqueue a
+// `file-browse` control-job pinned to the caller-selected server
+// (`assignedServerId`) and block for a short window while that server's daemon
+// (`daemon/pipelines/file-browse.mjs`, B2) lists/reads under its own
+// server-scoped root (`FUTURATOR_BROWSE_ROOT`) with traversal rejection. Path
+// safety therefore lives entirely on the daemon side — there is no hard
+// `/home/ubuntu` root or shell-quoting whitelist in the Lambda anymore.
 
-function assertSafeEc2Path(p: string): void {
-  if (!/^\/[\w/.\-]+$/.test(p)) throw new ValidationError('Invalid path');
-  if (p.includes('..')) throw new ValidationError('Invalid path');
-  if (p !== EC2_BROWSE_ROOT && !p.startsWith(`${EC2_BROWSE_ROOT}/`)) {
-    throw new ValidationError(`Path must be under ${EC2_BROWSE_ROOT}`);
+// Server-side wait budget for one file-browse round-trip. Comfortably under
+// the API Lambda's 30s cap so a slow/stale daemon surfaces as a 504 rather
+// than a hung request.
+const FILE_BROWSE_WAIT_MS = 12_000;
+const FILE_BROWSE_POLL_MS = 400;
+
+// Validate a `?serverId=` against the fleet: the server must exist, be
+// enabled, and carry a fresh heartbeat (a dead EC2 box must never block the
+// panel). Unknown → 404, disabled/stale → 409 (both 4xx per B4 AC).
+async function resolveFreshBrowseServer(serverId: string | undefined): Promise<ComputeServer> {
+  if (!serverId) throw new ValidationError('query param ?serverId= is required');
+  const server = await getServerById(serverId);
+  if (!server) throw new NotFoundError('Server', serverId);
+  const ageMs = server.lastHeartbeatAt
+    ? Date.now() - Date.parse(server.lastHeartbeatAt)
+    : Number.POSITIVE_INFINITY;
+  if (!server.enabled || !(ageMs < HEARTBEAT_FRESH_MS)) {
+    throw new AppError(
+      'SERVER_STALE',
+      `Server ${serverId} is disabled or its heartbeat is stale`,
+      409,
+    );
   }
+  return server;
+}
+
+// Enqueue a `file-browse` job on the given server and block until the daemon
+// writes the denormalized `fileBrowseResult`, the job FAILs, or the wait
+// budget elapses (→ 504). B3 pins the job to `assignedServerId` even with
+// server-aware dispatch OFF, so the target box (and only it) claims the row.
+async function runFileBrowse(
+  serverId: string,
+  op: 'list' | 'read',
+  path: string,
+  userId: string,
+): Promise<NonNullable<import('../shared/types/agent-orchestrator').AgentJob['fileBrowseResult']>> {
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await agentJobsRepo.createJob({
+    jobId,
+    status: 'PENDING',
+    createdAt: now,
+    updatedAt: now,
+    createdBy: userId,
+    workingDir: '',
+    jobType: 'file-browse',
+    assignedServerId: serverId,
+    fileBrowsePayload: { op, path, serverId },
+  });
+
+  const deadline = Date.now() + FILE_BROWSE_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, FILE_BROWSE_POLL_MS));
+    const job = await agentJobsRepo.getJobById(jobId);
+    if (!job) continue;
+    if (job.status === 'FAILED') {
+      throw new AppError('FILE_BROWSE_FAILED', job.errorMessage ?? 'file-browse job failed', 502);
+    }
+    if (job.status === 'COMPLETED' && job.fileBrowseResult) {
+      return job.fileBrowseResult;
+    }
+  }
+  throw new AppError('FILE_BROWSE_TIMEOUT', 'file-browse job timed out', 504);
 }
 
 app.get('/api/ec2/files', authMiddleware, async (c) => {
-  const { state } = await getInstanceState();
-  if (state !== 'running') {
-    throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
-  }
-
-  const dirPath = c.req.query('path') || EC2_BROWSE_ROOT;
-  assertSafeEc2Path(dirPath);
-
-  // ls -p appends / to directories, --group-directories-first for easier parsing
-  const cmd = `ls -lAp --group-directories-first --time-style=long-iso "${dirPath}" 2>&1 || echo "__LS_ERROR__"`;
-  const commandId = await sendSsmCommand(cmd);
-  const output = await waitForSsmOutput(commandId);
-
-  if (output.includes('__LS_ERROR__') || output.includes('No such file or directory')) {
-    throw new NotFoundError('Directory', dirPath);
-  }
-
-  const lines = output.split('\n').filter((l) => l.trim() && !l.startsWith('total '));
-  const entries = lines
-    .map((line) => {
-      // Parse ls -lAp --time-style=long-iso output:
-      // drwxr-xr-x 2 ubuntu ubuntu 4096 2025-01-15 10:30 dirname/
-      // -rw-r--r-- 1 ubuntu ubuntu  123 2025-01-15 10:30 file.txt
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 8) return null;
-      const permissions = parts[0];
-      const size = parseInt(parts[4], 10);
-      const date = parts[5];
-      const time = parts[6];
-      const name = parts.slice(7).join(' ');
-      const isDir = name.endsWith('/');
-      return {
-        name: isDir ? name.slice(0, -1) : name,
-        type: isDir ? ('directory' as const) : ('file' as const),
-        size,
-        permissions,
-        modified: `${date} ${time}`,
-      };
-    })
-    .filter(Boolean);
-
-  return c.json({ path: dirPath, entries });
+  const server = await resolveFreshBrowseServer(c.req.query('serverId'));
+  // No hard root: an empty path lets the daemon default to its own
+  // server-scoped browse root and echo the resolved path back.
+  const dirPath = c.req.query('path') || '';
+  const result = await runFileBrowse(server.serverId, 'list', dirPath, c.get('user').userId);
+  return c.json({ path: result.path, entries: result.entries ?? [] });
 });
 
-// Read a single file under /home/ubuntu. Returns text inline for editor
-// rendering or base64 for images / binary so the UI can build a data: URL or
-// trigger a download. Hard-capped at 2 MB — bigger files come back with
-// `tooLarge: true` so the frontend can offer a download instead of choking the
-// browser.
-const EC2_FILE_MAX_BYTES = 2 * 1024 * 1024;
-const TEXT_EXTS = new Set([
-  'ts',
-  'tsx',
-  'js',
-  'jsx',
-  'mjs',
-  'cjs',
-  'json',
-  'jsonc',
-  'md',
-  'mdx',
-  'txt',
-  'log',
-  'yaml',
-  'yml',
-  'toml',
-  'ini',
-  'env',
-  'html',
-  'htm',
-  'xml',
-  'svg',
-  'css',
-  'scss',
-  'sass',
-  'less',
-  'sh',
-  'bash',
-  'zsh',
-  'fish',
-  'py',
-  'rb',
-  'go',
-  'rs',
-  'java',
-  'c',
-  'h',
-  'cpp',
-  'hpp',
-  'cs',
-  'php',
-  'swift',
-  'kt',
-  'sql',
-  'graphql',
-  'gql',
-  'gitignore',
-  'dockerignore',
-  'dockerfile',
-  'editorconfig',
-  'prettierrc',
-]);
-const IMAGE_EXTS: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  bmp: 'image/bmp',
-  // image/vnd.microsoft.icon is the IANA-registered MIME and is decoded by
-  // every modern browser when fed via blob URL. The legacy image/x-icon was
-  // unreliable in Chrome data-URL flows.
-  ico: 'image/vnd.microsoft.icon',
-  // svg is intentionally classified as text so it lands in the code editor by
-  // default; the viewer offers a Source/Preview toggle for it.
-};
-const PDF_MIME = 'application/pdf';
-
-function classifyFile(
-  name: string,
-):
-  | { kind: 'text'; mime: string }
-  | { kind: 'image'; mime: string }
-  | { kind: 'pdf'; mime: string }
-  | { kind: 'binary'; mime: string } {
-  const lower = name.toLowerCase();
-  const ext = lower.includes('.') ? lower.split('.').pop()! : lower;
-  if (ext === 'pdf') return { kind: 'pdf', mime: PDF_MIME };
-  if (IMAGE_EXTS[ext]) return { kind: 'image', mime: IMAGE_EXTS[ext] };
-  if (TEXT_EXTS.has(ext)) return { kind: 'text', mime: 'text/plain' };
-  // Files with no extension (LICENSE, README, Makefile, Dockerfile) are
-  // overwhelmingly text — try them as text and let the frontend deal with
-  // any decode failures.
-  if (!lower.includes('.')) return { kind: 'text', mime: 'text/plain' };
-  return { kind: 'binary', mime: 'application/octet-stream' };
-}
-
+// Read a single file on the selected server. The daemon (B2) returns it
+// already classified — text inline for editor rendering, base64 for
+// image/pdf/binary, or a `tooLarge` marker (2 MB cap) so the frontend can
+// offer a download. We relay `fileBrowseResult` in the exact wire shapes the
+// frontend already expects (`use-ec2-files.ts` FileContentResponse).
 app.get('/api/ec2/files/content', authMiddleware, async (c) => {
-  const { state } = await getInstanceState();
-  if (state !== 'running') {
-    throw new AppError('EC2_NOT_RUNNING', `EC2 instance is ${state}`, 400);
-  }
-
+  const server = await resolveFreshBrowseServer(c.req.query('serverId'));
   const filePath = c.req.query('path');
   if (!filePath) throw new ValidationError('query param ?path= is required');
-  assertSafeEc2Path(filePath);
 
-  const name = filePath.split('/').pop() || '';
-  const classified = classifyFile(name);
+  const result = await runFileBrowse(server.serverId, 'read', filePath, c.get('user').userId);
 
-  // Two-phase read: meta first (tiny output, never truncated), then the
-  // content via readFileChunkedViaSsm. The previous single-shot script
-  // base64'd the whole file inline and was silently truncated by SSM's 24K
-  // StandardOutputContent cap for files >~18 KB.
-  const script = [
-    `f="${filePath}"`,
-    'if [ ! -e "$f" ]; then echo "__NOT_FOUND__"; exit 0; fi',
-    'if [ ! -f "$f" ]; then echo "__NOT_FILE__"; exit 0; fi',
-    'sz=$(stat -c%s "$f")',
-    'mt=$(stat -c%Y "$f")',
-    `if [ "$sz" -gt ${EC2_FILE_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz:$mt"; exit 0; fi`,
-    'echo "__META__:$sz:$mt"',
-  ].join('\n');
-
-  const commandId = await sendSsmCommand(script);
-  const raw = await waitForSsmOutput(commandId);
-  const output = raw.trimEnd();
-
-  if (output.startsWith('__NOT_FOUND__')) throw new NotFoundError('File', filePath);
-  if (output.startsWith('__NOT_FILE__')) {
-    throw new ValidationError('Path is not a regular file');
-  }
-
-  if (output.startsWith('__TOO_LARGE__')) {
-    const [, sz, mt] = output.split('\n')[0].split(':');
+  if (result.tooLarge) {
     return c.json({
       tooLarge: true,
-      size: Number(sz),
-      mtime: Number(mt) * 1000,
-      kind: classified.kind,
-      mime: classified.mime,
-      maxBytes: EC2_FILE_MAX_BYTES,
+      size: result.size,
+      mtime: result.mtime,
+      kind: result.kind,
+      mime: result.mime,
+      maxBytes: result.maxBytes,
     });
   }
-
-  const metaLine = output.split('\n').find((l) => l.startsWith('__META__:'));
-  if (!metaLine) {
-    throw new AppError('SSM_PARSE', 'Unexpected SSM output format', 502);
+  if (result.kind === 'text') {
+    return c.json({
+      kind: 'text' as const,
+      mime: result.mime,
+      size: result.size,
+      mtime: result.mtime,
+      content: result.content,
+    });
   }
-  const [, szStr, mtStr] = metaLine.split(':');
-  const size = Number(szStr);
-  const mtime = Number(mtStr) * 1000;
-
-  const buf = await readFileChunkedViaSsm(filePath, size);
-  const base64 = buf.toString('base64');
-
-  if (classified.kind === 'text') {
-    let content: string;
-    try {
-      content = buf.toString('utf-8');
-    } catch {
-      // Fall through and return as binary so the frontend can offer a download.
-      return c.json({
-        kind: 'binary' as const,
-        mime: 'application/octet-stream',
-        size,
-        mtime,
-        base64,
-      });
-    }
-    return c.json({ kind: 'text' as const, mime: classified.mime, size, mtime, content });
-  }
-
-  return c.json({ kind: classified.kind, mime: classified.mime, size, mtime, base64 });
+  return c.json({
+    kind: result.kind,
+    mime: result.mime,
+    size: result.size,
+    mtime: result.mtime,
+    base64: result.base64,
+  });
 });
 
 // ── EC2 Metrics (CloudWatch) ──
+// E3 (EU migration) — parameterized by `?instanceId=` so a fleet server's
+// own instance id can be queried; falls back to the legacy singleton
+// `EC2_INSTANCE_ID` when the query param is absent (back-compat).
 app.get('/api/ec2/metrics', async (c) => {
+  const instanceId = c.req.query('instanceId') || EC2_INSTANCE_ID;
+  if (!/^i-[0-9a-f]{8,}$/.test(instanceId)) {
+    throw new ValidationError('instanceId must match the i-… format');
+  }
+
   const range = c.req.query('range') || '1h'; // 1h, 3h, 6h, 24h
   const rangeMs: Record<string, number> = {
     '1h': 3600_000,
@@ -7414,7 +7349,7 @@ app.get('/api/ec2/metrics', async (c) => {
             Metric: {
               Namespace: 'AWS/EC2',
               MetricName: 'CPUUtilization',
-              Dimensions: [{ Name: 'InstanceId', Value: EC2_INSTANCE_ID }],
+              Dimensions: [{ Name: 'InstanceId', Value: instanceId }],
             },
             Period: period,
             Stat: 'Average',
@@ -7426,7 +7361,7 @@ app.get('/api/ec2/metrics', async (c) => {
             Metric: {
               Namespace: 'Futurator/EC2',
               MetricName: 'mem_used_percent',
-              Dimensions: [{ Name: 'InstanceId', Value: EC2_INSTANCE_ID }],
+              Dimensions: [{ Name: 'InstanceId', Value: instanceId }],
             },
             Period: period,
             Stat: 'Average',
@@ -7439,7 +7374,7 @@ app.get('/api/ec2/metrics', async (c) => {
               Namespace: 'Futurator/EC2',
               MetricName: 'disk_used_percent',
               Dimensions: [
-                { Name: 'InstanceId', Value: EC2_INSTANCE_ID },
+                { Name: 'InstanceId', Value: instanceId },
                 { Name: 'path', Value: '/' },
                 { Name: 'device', Value: 'xvda1' },
                 { Name: 'fstype', Value: 'ext4' },
@@ -7455,7 +7390,7 @@ app.get('/api/ec2/metrics', async (c) => {
             Metric: {
               Namespace: 'AWS/EC2',
               MetricName: 'NetworkIn',
-              Dimensions: [{ Name: 'InstanceId', Value: EC2_INSTANCE_ID }],
+              Dimensions: [{ Name: 'InstanceId', Value: instanceId }],
             },
             Period: period,
             Stat: 'Sum',
@@ -7467,7 +7402,7 @@ app.get('/api/ec2/metrics', async (c) => {
             Metric: {
               Namespace: 'AWS/EC2',
               MetricName: 'NetworkOut',
-              Dimensions: [{ Name: 'InstanceId', Value: EC2_INSTANCE_ID }],
+              Dimensions: [{ Name: 'InstanceId', Value: instanceId }],
             },
             Period: period,
             Stat: 'Sum',
@@ -7491,19 +7426,39 @@ app.get('/api/ec2/metrics', async (c) => {
     };
   }
 
-  return c.json({ range, period, instanceId: EC2_INSTANCE_ID, metrics });
+  return c.json({ range, period, instanceId, metrics });
 });
 
 // On-demand snapshot via SSM
+// E3 (EU migration) — parameterized by `?instanceId=`, falling back to the
+// legacy singleton `EC2_INSTANCE_ID` (back-compat). `sendSsmCommand` /
+// `getInstanceState` are frozen shared helpers (§2.2) still hardcoded to the
+// legacy instance, so the SendCommand + running-state check stay on the
+// default box; only the SSM command's target and result poll are inlined
+// here to honor a non-default `instanceId`.
 app.get('/api/ec2/snapshot', async (c) => {
+  const instanceId = c.req.query('instanceId') || EC2_INSTANCE_ID;
+  if (!/^i-[0-9a-f]{8,}$/.test(instanceId)) {
+    throw new ValidationError('instanceId must match the i-… format');
+  }
+
   const { state } = await getInstanceState();
   if (state !== 'running') {
     return c.json({ state, snapshot: null });
   }
 
-  const cmdId = await sendSsmCommand(
-    'echo "===CPU==="; top -bn1 | head -5; echo "===MEM==="; free -m | grep -E "Mem|Swap"; echo "===DISK==="; df -h / | tail -1; echo "===PROCS==="; ps aux --sort=-%mem | head -8; echo "===CLAUDE==="; ps aux | grep claude | grep -v grep | wc -l; echo "===DAEMON==="; systemctl is-active futurator-daemon; echo "===UPTIME==="; uptime -s',
+  const cmdResult = await ssmClient.send(
+    new SendCommandCommand({
+      InstanceIds: [instanceId],
+      DocumentName: 'AWS-RunShellScript',
+      Parameters: {
+        commands: [
+          'echo "===CPU==="; top -bn1 | head -5; echo "===MEM==="; free -m | grep -E "Mem|Swap"; echo "===DISK==="; df -h / | tail -1; echo "===PROCS==="; ps aux --sort=-%mem | head -8; echo "===CLAUDE==="; ps aux | grep claude | grep -v grep | wc -l; echo "===DAEMON==="; systemctl is-active futurator-daemon; echo "===UPTIME==="; uptime -s',
+        ],
+      },
+    }),
   );
+  const cmdId = cmdResult.Command?.CommandId || '';
 
   // Wait for result (up to 10s)
   let output = '';
@@ -7513,7 +7468,7 @@ app.get('/api/ec2/snapshot', async (c) => {
       const inv = await ssmClient.send(
         new GetCommandInvocationCommand({
           CommandId: cmdId,
-          InstanceId: EC2_INSTANCE_ID,
+          InstanceId: instanceId,
         }),
       );
       if (inv.Status === 'Success') {
@@ -9602,9 +9557,9 @@ app.post('/api/admin/bootstrap-self-edit-repo', async (c) => {
  * (`party-docs/<projectId>/<file>`, pre-scoping) are no longer listed.
  */
 function partyDocsBucket(): string {
-  const bucket = process.env.FUTURATOR_PUBLIC_BUCKET;
-  if (!bucket) throw new AppError('CONFIG_ERROR', 'FUTURATOR_PUBLIC_BUCKET not set', 500);
-  return bucket;
+  // KD-3 (S0.3): repointed off the dead FUTURATOR_PUBLIC_BUCKET onto the EU
+  // knowledge bucket; the :1464 IAM grant moves with it.
+  return process.env.FUTURATOR_KNOWLEDGE_BUCKET || 'futurator-knowledge-live-eu';
 }
 
 function partyDocS3Prefix(projectId: string, scope: DocScope, sessionId?: string): string {
@@ -10973,7 +10928,8 @@ app.post('/api/free-agent/sessions', authMiddleware, async (c) => {
   const costCapUsd = parsed.data.costCapUsd ?? FREE_AGENT_DEFAULT_COST_CAP_USD;
   // Derive projectId from scope.id when scope.kind === 'project'; fall back to
   // a synthetic id for non-project scopes (the daemon worktree path is still
-  // /home/ubuntu/free-agent-worktrees/<projectId>/<sessionId>/).
+  // free-agent-worktrees/<projectId>/<sessionId>/ — see D5 pointer comment at
+  // the workingDir literal below for the host-prefix removal).
   const projectId =
     (scope.kind === 'project' || scope.kind === 'app') && scope.id ? scope.id : `_${scope.kind}`;
   const sessionId = crypto.randomUUID();
@@ -11104,7 +11060,12 @@ app.post('/api/free-agent/sessions/:id/messages', authMiddleware, async (c) => {
     createdAt: now,
     updatedAt: now,
     createdBy: user.userId,
-    workingDir: `/home/ubuntu/free-agent-worktrees/${session.projectId}/${session.sessionId}`,
+    // EU migration D5: dropped the /home/ubuntu/ prefix (host-specific, dead
+    // post-migration) — kept the free-agent-worktrees/<projectId>/<sessionId>
+    // segment pair, which is the actual matcher contract (see
+    // workingDirMatchesApp, agent-jobs-repository.ts:84-90; anchors on the
+    // segment AFTER a known root, not the full path).
+    workingDir: `free-agent-worktrees/${session.projectId}/${session.sessionId}`,
     jobType: 'free-agent-session',
     freeAgentSessionPayload: {
       sessionId: session.sessionId,
@@ -13529,7 +13490,8 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
 
   // 2026-05-21 — App-delete is the nuclear option. Everything goes:
   // EC2 folder, GitHub repo, S3 deployed bundle, S3 knowledge-live
-  // mirror, Memgraph nodes scoped to projectId=appId, brownfield PAT
+  // mirror, graph-store nodes/edges scoped to projectId=appId (S2.3 —
+  // DynamoDB partition delete, no EC2/SSM/mgconsole), brownfield PAT
   // secret (30-day SM recovery window), Plans+Epics+Stories+Jobs+Events,
   // App row. Per-step results surface so the operator can audit what
   // actually landed.
@@ -13631,40 +13593,21 @@ app.delete('/api/apps/:appId', authMiddleware, async (c) => {
     results.push({ step: 'reflections+lock', status: 'error', detail: String(err) });
   }
 
-  // 2. Memgraph wipe — best-effort. Nodes carry projectId={appId}.
-  // Runs daemon-side via SSM because Memgraph listens on EC2 localhost
-  // only. Cypher: MATCH (n {projectId: $app}) DETACH DELETE n.
+  // 2. Graph-store purge — DynamoDB partition delete, direct from Lambda
+  // (S2.3; replaces the old SSM/mgconsole Memgraph wipe — zero EC2/SSM).
+  // Both partitions are queried strictly by projectId={appId} (nodes: table
+  // PK; edges: project-index GSI hash key), so this can never cross into
+  // another app's rows.
   try {
-    const cypher = `MATCH (n {projectId: '${appId.replace(/'/g, "\\'")}'}) DETACH DELETE n RETURN count(n) AS deleted;`;
-    const cmd = [
-      `if ! command -v mgconsole >/dev/null 2>&1; then echo MEMGRAPH_NO_CLIENT; exit 0; fi`,
-      `if ! ss -tln 2>/dev/null | grep -q :7687; then echo MEMGRAPH_DOWN; exit 0; fi`,
-      `echo "${cypher}" | mgconsole --output-format=csv 2>&1 | tail -5`,
-      `echo MEMGRAPH_DONE`,
-    ].join('\n');
-    const commandId = await sendSsmCommand(cmd);
-    const output = await waitForSsmOutput(commandId);
-    if (output.includes('MEMGRAPH_NO_CLIENT')) {
-      results.push({ step: 'memgraph', status: 'skipped', detail: 'mgconsole not installed' });
-    } else if (output.includes('MEMGRAPH_DOWN')) {
-      results.push({ step: 'memgraph', status: 'skipped', detail: 'memgraph not listening' });
-    } else if (output.includes('MEMGRAPH_DONE')) {
-      const match = output.match(/(\d+)/);
-      results.push({
-        step: 'memgraph',
-        status: 'done',
-        detail: match ? `${match[1]} nodes deleted` : 'cypher returned ok',
-      });
-    } else {
-      results.push({
-        step: 'memgraph',
-        status: 'error',
-        detail: `unexpected output: ${output.slice(0, 200)}`,
-      });
-    }
+    const { nodesDeleted, edgesDeleted } = await purgeProjectGraph(appId);
+    results.push({
+      step: 'graph',
+      status: 'done',
+      detail: `${nodesDeleted} nodes + ${edgesDeleted} edges deleted`,
+    });
   } catch (err) {
     results.push({
-      step: 'memgraph',
+      step: 'graph',
       status: 'error',
       detail: err instanceof Error ? err.message : String(err),
     });
@@ -14316,7 +14259,7 @@ app.get('/api/timing/cohort', async (c) => {
 // PR-16 — terminal-status snapshot cache:
 //   When the plan has reached a terminal status (delivered / archived /
 //   review with all stories done), the forensic payload is cached at
-//   `s3://${FUTURATOR_PUBLIC_BUCKET}/timing/<planId>-forensic.json` after
+//   `s3://${FUTURATOR_KNOWLEDGE_BUCKET}/timing/<planId>-forensic.json` after
 //   the first computation. Subsequent GETs stream from S3 (~$0 read,
 //   ~50 ms vs ~600 ms for live recompute). For non-terminal plans the
 //   route always recomputes (data is changing) and never writes a snapshot
@@ -14326,7 +14269,9 @@ app.get('/api/timing/cohort', async (c) => {
 //
 //   Bucket scope: see sst.config.ts permissions block — `timing/*` is a
 //   distinct prefix from data/, media/, apps/, knowledge-live/.
-const FORENSIC_S3_BUCKET = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+// KD-3 (S0.3): repointed off the dead FUTURATOR_PUBLIC_BUCKET onto the EU
+// knowledge bucket; the :1475 IAM grant moves with it.
+const FORENSIC_S3_BUCKET = process.env.FUTURATOR_KNOWLEDGE_BUCKET || 'futurator-knowledge-live-eu';
 
 function isPlanTerminalForForensic(plan: {
   status?: string;
@@ -14978,7 +14923,9 @@ async function readBareRepoGitGraph(appId: string): Promise<unknown | null> {
   try {
     const res = await s3.send(
       new GetObjectCommand({
-        Bucket: 'futurator-ai-website',
+        // KD-3 (S0.3): repointed off the dead public bucket onto the EU
+        // knowledge bucket.
+        Bucket: process.env.FUTURATOR_KNOWLEDGE_BUCKET || 'futurator-knowledge-live-eu',
         Key: `knowledge-live/${appId}/_graph/git-graph.json`,
       }),
     );

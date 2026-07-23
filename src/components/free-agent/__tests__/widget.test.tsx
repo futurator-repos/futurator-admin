@@ -118,7 +118,7 @@ describe('FreeAgentWidget — EC2 mode gating (AC #9)', () => {
     renderWithQuery(<FreeAgentWidget />);
     const fab = screen.getByTestId('free-agent-fab');
     expect(fab).toHaveAttribute('data-disabled', 'true');
-    expect(fab).toHaveAttribute('title', expect.stringContaining('Switch to EC2'));
+    expect(fab).toHaveAttribute('title', expect.stringContaining('Switch to Fleet'));
   });
 
   it('marks the FAB enabled when EC2 mode is ec2', () => {

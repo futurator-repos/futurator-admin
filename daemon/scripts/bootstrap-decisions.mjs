@@ -182,7 +182,6 @@ const PACKAGE_CATEGORIES = {
     'dynamodb-toolbox': { name: 'DynamoDB Toolbox', tags: ['dynamodb', 'aws', 'database'] },
     'redis': { name: 'Redis', tags: ['redis', 'cache', 'database'] },
     'ioredis': { name: 'Redis (ioredis)', tags: ['redis', 'cache', 'database'] },
-    'neo4j-driver': { name: 'Neo4j/Memgraph', tags: ['graph-database', 'neo4j'] },
   },
   auth: {
     'next-auth': { name: 'NextAuth.js', tags: ['nextauth', 'authentication'] },

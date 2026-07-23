@@ -1,21 +1,21 @@
 /**
  * verify-graph.mjs — System-graph health probe.
  *
- * Connects to Memgraph and reports node-kind counts, grouped into the layers the
+ * Reads the graph store and reports node-kind counts, grouped into the layers the
  * pipeline builds, so you can tell at a glance whether the NEW system-graph
  * layers (Epic 1 infra/route/service, Epic 5/6 capability/contract spine) have
  * actually populated — versus only the old AST + wiki-article layers.
  *
  * Usage:
- *   node verify-graph.mjs                 # whole graph
- *   node verify-graph.mjs --project dino1 # one project
- *   node verify-graph.mjs --json          # machine-readable
+ *   node verify-graph.mjs --project dino1 # one project (required — the store is
+ *                                         #   project-partitioned; no whole-graph scan)
+ *   node verify-graph.mjs --project dino1 --json  # machine-readable
  *
- * Env: MEMGRAPH_URI (default bolt://localhost:7687), MEMGRAPH_USER,
- *      MEMGRAPH_PASSWORD (omit both for an unauthenticated local instance).
+ * Env: GRAPH_NODES_TABLE, GRAPH_EDGES_TABLE, AWS_REGION (DynamoDB store); omit
+ *      to fall back to the in-memory store. Bolt/Memgraph EXCISED (EU-migration S2.2).
  */
 
-import neo4j from 'neo4j-driver';
+import { createGraphStore } from './lib/graph-store.mjs';
 
 // Which kinds belong to which layer (for the verdict).
 const LAYERS = {
@@ -75,47 +75,41 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const uri = process.env.MEMGRAPH_URI || 'bolt://localhost:7687';
-  const user = process.env.MEMGRAPH_USER || '';
-  const pass = process.env.MEMGRAPH_PASSWORD || '';
-  const auth = user ? neo4j.auth.basic(user, pass) : undefined;
-
-  const driver = neo4j.driver(uri, auth);
-  const session = driver.session();
-  try {
-    const where = args.project ? 'WHERE n.projectId = $project' : '';
-    const r = await session.run(
-      `MATCH (n:Node) ${where}
-       RETURN coalesce(n.kind, '<null>') AS kind, count(*) AS count
-       ORDER BY count DESC`,
-      { project: args.project },
-    );
-    const rows = r.records.map((rec) => ({
-      kind: rec.get('kind'),
-      count: rec.get('count').toNumber ? rec.get('count').toNumber() : Number(rec.get('count')),
-    }));
-    const summary = classifyGraph(rows);
-
-    if (args.json) {
-      console.log(JSON.stringify({ project: args.project ?? 'all', ...summary }, null, 2));
-      return;
-    }
-
-    console.log(`\nGraph: ${args.project ? `project=${args.project}` : 'all projects'} @ ${uri}`);
-    console.log(`Total nodes: ${summary.total}\n`);
-    console.log('By kind:');
-    for (const { kind, count } of rows) console.log(`  ${kind.padEnd(18)} ${count}`);
-    console.log('\nBy layer:');
-    for (const [layer, n] of Object.entries(summary.totals)) console.log(`  ${layer.padEnd(16)} ${n}`);
-    console.log('\nVerdict:');
-    console.log(`  AST layer (function/class/file):  ${summary.totals.ast > 0 ? 'present ✓' : 'EMPTY ✗'}`);
-    console.log(`  System-graph (infra/service/route): ${summary.hasSystemGraph ? 'present ✓' : 'EMPTY ✗ — extractors have not run'}`);
-    console.log(`  Contract spine (capability/contract): ${summary.hasContractSpine ? 'present ✓' : 'absent (needs --global federation)'}`);
-    console.log('');
-  } finally {
-    await session.close();
-    await driver.close();
+  if (!args.project) {
+    console.error('[verify-graph] --project <id> is required (the graph store is project-partitioned)');
+    process.exit(1);
   }
+
+  const store = await createGraphStore();
+  const label = process.env.GRAPH_NODES_TABLE || 'in-memory';
+
+  const nodes = await store.listNodes(args.project);
+  const byKind = new Map();
+  for (const n of nodes) {
+    const kind = n.kind || '<null>';
+    byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+  }
+  const rows = [...byKind.entries()]
+    .map(([kind, count]) => ({ kind, count }))
+    .sort((a, b) => b.count - a.count);
+  const summary = classifyGraph(rows);
+
+  if (args.json) {
+    console.log(JSON.stringify({ project: args.project, ...summary }, null, 2));
+    return;
+  }
+
+  console.log(`\nGraph: project=${args.project} @ ${label}`);
+  console.log(`Total nodes: ${summary.total}\n`);
+  console.log('By kind:');
+  for (const { kind, count } of rows) console.log(`  ${kind.padEnd(18)} ${count}`);
+  console.log('\nBy layer:');
+  for (const [layer, n] of Object.entries(summary.totals)) console.log(`  ${layer.padEnd(16)} ${n}`);
+  console.log('\nVerdict:');
+  console.log(`  AST layer (function/class/file):  ${summary.totals.ast > 0 ? 'present ✓' : 'EMPTY ✗'}`);
+  console.log(`  System-graph (infra/service/route): ${summary.hasSystemGraph ? 'present ✓' : 'EMPTY ✗ — extractors have not run'}`);
+  console.log(`  Contract spine (capability/contract): ${summary.hasContractSpine ? 'present ✓' : 'absent (needs --global federation)'}`);
+  console.log('');
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {

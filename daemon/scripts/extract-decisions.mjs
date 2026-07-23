@@ -21,7 +21,12 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import { createDriver } from './lib/memgraph-driver.mjs';
+import { createGraphStore } from './lib/graph-store.mjs';
+
+/** Read a node field, falling back to the allowlisted `props` bag. */
+function nodeField(node, key) {
+  return node?.[key] ?? node?.props?.[key];
+}
 import {
   parseFrontmatter,
   serializeFrontmatter,
@@ -500,48 +505,34 @@ ${placeholder.description}
 
 /**
  * Detect conflicts between a new decision and existing decisions.
- * Uses tag overlap and optionally vector similarity (when Memgraph is available).
+ * Uses tag overlap over the graph store (bolt EXCISED, EU-migration S2.2).
  *
  * @param {Object} newDecision - The new decision to check
  * @param {string} projectId
- * @param {import('neo4j-driver').Driver} [driver] - Optional Memgraph driver
+ * @param {object} [store] - Optional GraphStore instance
  * @returns {Promise<Array<{ nodeId: string, title: string, sharedTags: string[], similarity: number }>>}
  */
-export async function detectConflicts(newDecision, projectId, driver) {
+export async function detectConflicts(newDecision, projectId, store) {
   const conflicts = [];
 
-  if (!driver) return conflicts;
+  if (!store) return conflicts;
 
-  const session = driver.session();
-  try {
-    // Query existing decisions with overlapping tags
-    const result = await session.run(
-      `MATCH (d:Node {type: 'adr', projectId: $projectId, status: 'active'})
-       WHERE d.nodeId <> $newNodeId
-         AND any(tag IN d.tags WHERE tag IN $newTags)
-       RETURN d.nodeId AS nodeId, d.title AS title, d.tags AS tags`,
-      {
-        projectId,
-        newNodeId: `decisions/${newDecision.slug}`,
-        newTags: newDecision.tags,
-      }
-    );
+  const newNodeId = `decisions/${newDecision.slug}`;
+  const adrNodes = (await store.listNodes(projectId)).filter(
+    (n) => (nodeField(n, 'type') ?? n.kind) === 'adr' && (n.status ?? 'active') === 'active' && n.nodeId !== newNodeId,
+  );
 
-    for (const record of result.records) {
-      const existingTags = record.get('tags') || [];
-      const sharedTags = newDecision.tags.filter(t => existingTags.includes(t) && t !== 'architecture-decision');
-
-      if (sharedTags.length > 0) {
-        conflicts.push({
-          nodeId: record.get('nodeId'),
-          title: record.get('title'),
-          sharedTags,
-          similarity: sharedTags.length / Math.max(newDecision.tags.length, existingTags.length),
-        });
-      }
+  for (const n of adrNodes) {
+    const existingTags = nodeField(n, 'tags') || [];
+    const sharedTags = newDecision.tags.filter((t) => existingTags.includes(t) && t !== 'architecture-decision');
+    if (sharedTags.length > 0) {
+      conflicts.push({
+        nodeId: n.nodeId,
+        title: n.title ?? nodeField(n, 'title'),
+        sharedTags,
+        similarity: sharedTags.length / Math.max(newDecision.tags.length, existingTags.length),
+      });
     }
-  } finally {
-    await session.close();
   }
 
   return conflicts;
@@ -549,26 +540,18 @@ export async function detectConflicts(newDecision, projectId, driver) {
 
 /**
  * Create CONFLICTS_WITH edges between two decisions.
- * Bidirectional: creates edge in both directions (weight 0.9).
+ * Bidirectional: writes an edge in both directions (weight 0.9).
  *
  * @param {string} nodeId1
  * @param {string} nodeId2
  * @param {string} projectId
- * @param {import('neo4j-driver').Driver} driver
+ * @param {object} store - GraphStore instance
  */
-export async function createConflictEdges(nodeId1, nodeId2, projectId, driver) {
-  const session = driver.session();
-  try {
-    await session.run(
-      `MATCH (d1:Node {nodeId: $nodeId1, projectId: $projectId})
-       MATCH (d2:Node {nodeId: $nodeId2, projectId: $projectId})
-       MERGE (d1)-[:CONFLICTS_WITH {weight: 0.9}]->(d2)
-       MERGE (d2)-[:CONFLICTS_WITH {weight: 0.9}]->(d1)`,
-      { nodeId1, nodeId2, projectId }
-    );
-  } finally {
-    await session.close();
-  }
+export async function createConflictEdges(nodeId1, nodeId2, projectId, store) {
+  await store.putEdges(projectId, [
+    { from: nodeId1, to: nodeId2, type: 'CONFLICTS_WITH', props: { weight: 0.9 } },
+    { from: nodeId2, to: nodeId1, type: 'CONFLICTS_WITH', props: { weight: 0.9 } },
+  ]);
 }
 
 // ── ADR Article Creation ──
@@ -671,29 +654,23 @@ export function createDecisionArticle(decision, knowledgeDir, opts = {}) {
  *
  * @param {Object} decision
  * @param {string} projectId
- * @param {import('neo4j-driver').Driver} [driver]
+ * @param {object} [store] - Optional GraphStore instance
  * @returns {Promise<string[]>} Array of requirement nodeIds
  */
-export async function matchRequirements(decision, projectId, driver) {
+export async function matchRequirements(decision, projectId, store) {
   const matched = [];
 
-  if (!driver) return matched;
+  if (!store) return matched;
 
-  const session = driver.session();
-  try {
-    // Match by tag overlap
-    const result = await session.run(
-      `MATCH (req:Node {type: 'requirement', projectId: $projectId, status: 'active'})
-       WHERE any(tag IN req.tags WHERE tag IN $decisionTags AND tag <> 'architecture-decision' AND tag <> 'functional' AND tag <> 'non-functional')
-       RETURN req.nodeId AS nodeId, req.title AS title, req.tags AS tags`,
-      { projectId, decisionTags: decision.tags }
-    );
+  const EXCLUDED = new Set(['architecture-decision', 'functional', 'non-functional']);
+  const reqNodes = (await store.listNodes(projectId)).filter(
+    (n) => (nodeField(n, 'type') ?? n.kind) === 'requirement' && (n.status ?? 'active') === 'active',
+  );
 
-    for (const record of result.records) {
-      matched.push(record.get('nodeId'));
-    }
-  } finally {
-    await session.close();
+  for (const n of reqNodes) {
+    const reqTags = nodeField(n, 'tags') || [];
+    const overlap = reqTags.some((tag) => decision.tags.includes(tag) && !EXCLUDED.has(tag));
+    if (overlap) matched.push(n.nodeId);
   }
 
   return matched;
@@ -803,16 +780,16 @@ export async function extractDecisions(sessionOutput, knowledgeDir, opts = {}) {
   // Handle revision
   const revision = handleDecisionRevision(decisions, docSlug, knowledgeDir);
 
-  // Connect to Memgraph if available
-  let driver;
+  // Connect to the graph store when configured (bolt EXCISED, EU-migration S2.2).
+  // Preserve the "only when available" degrade: no tables env ⇒ null ⇒ the
+  // tag/edge helpers no-op.
+  let store = null;
   try {
-    driver = createDriver();
-    // Test connection
-    const testSession = driver.session();
-    await testSession.run('RETURN 1');
-    await testSession.close();
+    if (process.env.GRAPH_NODES_TABLE && process.env.GRAPH_EDGES_TABLE) {
+      store = await createGraphStore();
+    }
   } catch {
-    driver = null;
+    store = null;
   }
 
   const articles = [];
@@ -823,7 +800,7 @@ export async function extractDecisions(sessionOutput, knowledgeDir, opts = {}) {
     const nodeId = `decisions/${decision.slug}`;
 
     // Match to requirements
-    const linkedRequirements = await matchRequirements(decision, opts.projectId, driver);
+    const linkedRequirements = await matchRequirements(decision, opts.projectId, store);
     if (linkedRequirements.length === 0) {
       console.warn(`[extract-dec] Warning: Decision "${decision.title}" has no linked requirements (orphan decision)`);
     }
@@ -840,14 +817,14 @@ export async function extractDecisions(sessionOutput, knowledgeDir, opts = {}) {
     }
 
     // Detect conflicts
-    const conflicts = await detectConflicts(decision, opts.projectId, driver);
+    const conflicts = await detectConflicts(decision, opts.projectId, store);
     allConflicts.push(...conflicts.map(c => ({ ...c, decisionNodeId: nodeId })));
 
-    // Create conflict edges in Memgraph
-    if (driver) {
+    // Create conflict edges in the graph store
+    if (store) {
       for (const conflict of conflicts) {
         try {
-          await createConflictEdges(nodeId, conflict.nodeId, opts.projectId, driver);
+          await createConflictEdges(nodeId, conflict.nodeId, opts.projectId, store);
         } catch (err) {
           console.warn(`[extract-dec] Could not create conflict edge: ${err.message}`);
         }
@@ -871,9 +848,9 @@ export async function extractDecisions(sessionOutput, knowledgeDir, opts = {}) {
     });
   }
 
-  // Close driver
-  if (driver) {
-    try { await driver.close(); } catch { /* ignore */ }
+  // Close store
+  if (store) {
+    try { await store.close?.(); } catch { /* ignore */ }
   }
 
   // Log extraction

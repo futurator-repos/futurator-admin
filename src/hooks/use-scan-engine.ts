@@ -15,7 +15,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api-client';
 
-const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+const S3_BASE = 'https://futurator-knowledge-live-eu.s3.eu-central-1.amazonaws.com/knowledge-live';
 
 export interface RunScanEngineInput {
   src?: string;

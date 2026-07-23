@@ -94,25 +94,22 @@ export function bucketNodes(nodes, opts = {}) {
 }
 
 /**
- * Daemon-side collector: query the project's graph for its structural nodes and
- * return the formatted `<ground_truth>` block. Returns '' on any failure or an
- * empty graph (never throws — grounding is additive). Requires a Bolt session.
+ * Daemon-side collector: read the project's structural nodes from the graph
+ * store and return the formatted `<ground_truth>` block. Returns '' on any
+ * failure or an empty graph (never throws — grounding is additive). Requires a
+ * GraphStore instance (bolt EXCISED, EU-migration S2.2).
  *
- * @param {import('neo4j-driver').Session} session
+ * @param {object} store - GraphStore instance
  * @param {{ projectId: string, perCategory?: number }} args
  * @returns {Promise<string>}
  */
-export async function collectGroundTruth(session, { projectId, perCategory = 25 }) {
-  if (!session || !projectId) return '';
+export async function collectGroundTruth(store, { projectId, perCategory = 25 }) {
+  if (!store || !projectId) return '';
   try {
-    const r = await session.run(
-      `MATCH (n:Node {projectId: $projectId})
-       WHERE coalesce(n.status,'active') <> 'pruned'
-       RETURN coalesce(n.kind,'file') AS kind, coalesce(n.title, n.nodeId) AS title
-       ORDER BY kind, title`,
-      { projectId },
-    );
-    const nodes = r.records.map((rec) => ({ kind: rec.get('kind'), title: rec.get('title') }));
+    const nodes = (await store.listNodes(projectId))
+      .filter((n) => (n.status ?? 'active') !== 'pruned')
+      .map((n) => ({ kind: n.kind ?? 'file', title: n.title ?? n.nodeId }))
+      .sort((a, b) => a.kind.localeCompare(b.kind) || String(a.title).localeCompare(String(b.title)));
     return formatGroundTruth(bucketNodes(nodes, { perCategory }));
   } catch {
     // Graph unavailable / cold → run greenfield. Never block arch-gen.

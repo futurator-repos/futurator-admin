@@ -231,7 +231,15 @@ function useBlobUrl(base64: string, mime: string): string {
   return url;
 }
 
-function ImageRenderer({ mime, base64, filename }: { mime: string; base64: string; filename: string }) {
+function ImageRenderer({
+  mime,
+  base64,
+  filename,
+}: {
+  mime: string;
+  base64: string;
+  filename: string;
+}) {
   const url = useBlobUrl(base64, mime);
   return (
     <div className="flex h-full items-center justify-center overflow-auto bg-[#0b0b0b] p-4">
@@ -246,11 +254,17 @@ function ImageRenderer({ mime, base64, filename }: { mime: string; base64: strin
   );
 }
 
-function PdfRenderer({ mime, base64, filename }: { mime: string; base64: string; filename: string }) {
+function PdfRenderer({
+  mime,
+  base64,
+  filename,
+}: {
+  mime: string;
+  base64: string;
+  filename: string;
+}) {
   const url = useBlobUrl(base64, mime);
-  return (
-    <embed src={url} type={mime} title={filename} className="h-full w-full bg-[#0b0b0b]" />
-  );
+  return <embed src={url} type={mime} title={filename} className="h-full w-full bg-[#0b0b0b]" />;
 }
 
 // Render an SVG string by wrapping it in a blob URL — keeps the SVG sandboxed
@@ -345,8 +359,8 @@ export interface OpenTab {
   name: string;
 }
 
-export function FileViewer({ tab }: { tab: OpenTab }) {
-  const { data, isLoading, error } = useEc2FileContent(tab.path);
+export function FileViewer({ tab, serverId }: { tab: OpenTab; serverId: string }) {
+  const { data, isLoading, error } = useEc2FileContent(serverId, tab.path);
 
   if (isLoading) {
     return (
@@ -374,9 +388,7 @@ export function FileViewer({ tab }: { tab: OpenTab }) {
 
 // Discriminator helper — TS narrows the rest of the union to the readable
 // shape (kind + size + mtime + content|base64) once this returns false.
-function isTooLarge(
-  d: FileContentResponse,
-): d is Extract<FileContentResponse, { tooLarge: true }> {
+function isTooLarge(d: FileContentResponse): d is Extract<FileContentResponse, { tooLarge: true }> {
   return 'tooLarge' in d && d.tooLarge === true;
 }
 
@@ -414,12 +426,7 @@ function renderBody(tab: OpenTab, data: FileContentResponse, mode: ViewMode) {
     return <PdfRenderer mime={data.mime} base64={data.base64} filename={tab.name} />;
   }
   return (
-    <BinaryFallback
-      filename={tab.name}
-      size={data.size}
-      mime={data.mime}
-      base64={data.base64}
-    />
+    <BinaryFallback filename={tab.name} size={data.size} mime={data.mime} base64={data.base64} />
   );
 }
 

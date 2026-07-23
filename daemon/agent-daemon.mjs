@@ -22,7 +22,7 @@ import {
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { spawn, execSync, spawnSync } from 'child_process';
-import { mkdirSync, existsSync, readFileSync, statSync, appendFileSync, readdirSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, statSync, appendFileSync, readdirSync } from 'fs';
 import { join as pathJoin, extname as pathExtname, relative as pathRelative, basename as pathBasename } from 'path';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem, loadavg } from 'os';
@@ -41,6 +41,9 @@ import { createNdjsonForwarder } from './forwarder/ndjson-forwarder.mjs';
 import { createDdbEventStore } from './forwarder/ddb-event-store.mjs';
 import { createDaemonReceiver } from './receiver/http-receiver.mjs';
 import { createEpicRepo } from './pipelines/lib/epic-repo.mjs';
+// C-3 (EU migration) — token-clone helper reused for party materialize-on-claim
+// (mirrors party-bootstrap's brownfield clone step).
+import { cloneRepo } from './pipelines/lib/git-clone.mjs';
 // PR-11 #1 — wire the review-criteria parser/aggregator that was built but
 // never imported. Without these the validation `VERDICT === PASS` always
 // fails (VERDICT is never set), so reviewer pass verdicts get treated as
@@ -57,6 +60,9 @@ import {
 // with the literal placeholder; reviewer can't see story spec/ACs and
 // hallucinates verdicts.
 import { resolveAndSerializeContextPack } from './pipelines/lib/context-pack-resolver.mjs';
+// B2 — File Explorer control-job handler (local fs list/read under a
+// server-scoped browse root; replaces the SSM-backed /api/ec2/files routes).
+import { runFileBrowse } from './pipelines/file-browse.mjs';
 import {
   selectHandler,
   validateEpicDevJob,
@@ -94,6 +100,7 @@ import {
   JOB_HANDLER_QUICK_PLANSPEC,
   JOB_HANDLER_P3_QA,
   JOB_HANDLER_INTEGRATOR,
+  JOB_HANDLER_FILE_BROWSE,
   validateScanEngineJob,
   validateP3QaJob,
   validateIntegratorJob,
@@ -1029,9 +1036,10 @@ function runAgent(jobId, stepId, agentId, prompt, opts = {}) {
   return new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
 
-    // Mycelium graph MCP tools (gated by MYCELIUM_MCP=on). Co-located with
-    // Memgraph on the box — no VPC barrier. Extends the agent's allowlist with
-    // the read-only graph tools; no-op when the flag is off.
+    // Mycelium graph MCP tools (gated by MYCELIUM_MCP=on). Backed by the
+    // DynamoDB graph store (GRAPH_NODES_TABLE/GRAPH_EDGES_TABLE) — runs from any
+    // fleet host, no bolt. Extends the agent's allowlist with the read-only
+    // graph tools; no-op when the flag is off.
     const mcp = myceliumMcpSpawn(opts.allowedTools);
     args.push(...mcp.args);
 
@@ -1689,11 +1697,14 @@ const DAEMON_QUEUE_ONLY = process.env.DAEMON_QUEUE_ONLY === '1';
 
 /**
  * Whether THIS daemon may claim a given PENDING job, combining the queue-only
- * gate (DAEMON_QUEUE_ONLY) with queue-request target routing (DAEMON_SOURCE).
+ * gate (DAEMON_QUEUE_ONLY) with queue-request target routing (DAEMON_SOURCE)
+ * and — B3 (EU-migration completion plan §4.2) — the `file-browse` pin to
+ * `assignedServerId` (SERVER_ID), which holds even when `dispatch.serverAware`
+ * is OFF and the poller falls back to the global PENDING pool.
  */
 function canClaimJob(job) {
   if (DAEMON_QUEUE_ONLY && job?.jobType !== 'queue-request') return false;
-  return isJobClaimableBySource(job, DAEMON_SOURCE);
+  return isJobClaimableBySource(job, DAEMON_SOURCE, SERVER_ID);
 }
 
 // Servers module (Task 18) — log the missing-row conditional failure once,
@@ -2510,7 +2521,7 @@ async function executeStoryDevJob(job) {
       },
       // W5.1 — selective cross-story regression (dark unless P3_SELECTIVE_REGRESSION).
       // Reverse-impact this story's changed files → the prior tests covering them,
-      // and (in 'on') run only those. Non-blocking; Memgraph-down → skip.
+      // and (in 'on') run only those. Non-blocking; graph store unavailable → skip.
       selectiveRegression: async ({ headSha: sha, jobId }) => {
         const flag = process.env.P3_SELECTIVE_REGRESSION || 'off';
         if (flag === 'off' || !sha) return;
@@ -2520,12 +2531,18 @@ async function executeStoryDevJob(job) {
             .filter(Boolean).filter((f) => !/\.(test|spec)\./.test(f));
           if (!changedFiles.length) return;
           const changedNodeIds = changedFiles.map((f) => `code/${f.replace(/\//g, '--')}`);
-          const [{ createDriver }, { queryImpact }, { runSelectiveRegression }] = await Promise.all([
-            import('./scripts/lib/memgraph-driver.mjs'),
+          // EU-migration (S2.2): bolt/Memgraph EXCISED — reverse-impact runs over
+          // the GraphStore (DynamoDB when GRAPH_*_TABLE resolve, else in-memory).
+          // `queryImpact` needs the store partition (projectId === appId here), so
+          // bind it in a wrapper — `selective-regression.mjs` forwards its 2nd arg
+          // (legacy name `driver`) straight to `queryImpact` as the store.
+          const [{ createGraphStore }, { queryImpact }, { runSelectiveRegression }] = await Promise.all([
+            import('./scripts/lib/graph-store.mjs'),
             import('./scripts/lib/impact-propagation.mjs'),
             import('./lib/selective-regression.mjs'),
           ]);
-          const driver = createDriver();
+          const store = await createGraphStore();
+          const boundQueryImpact = (nodeId, s, o = {}) => queryImpact(nodeId, s, { ...o, projectId: appId });
           try {
             const runTest = flag === 'on'
               ? (testNodeId) => new Promise((res) => {
@@ -2535,14 +2552,14 @@ async function executeStoryDevJob(job) {
                   c.on('close', (code) => res({ passed: code === 0 }));
                 })
               : undefined;
-            const r = await runSelectiveRegression({ flag, changedNodeIds, driver, queryImpact, runTest });
+            const r = await runSelectiveRegression({ flag, changedNodeIds, driver: store, queryImpact: boundQueryImpact, runTest });
             log('info', `[${short}] selective-regression (${r.mode}): ${r.selected.length} covering test(s)` +
               (r.regressions.length ? `, ${r.regressions.length} REGRESSION(S): ${r.regressions.join(', ')}` : ''));
             if (r.regressions.length) {
               try { await pushEvent(jobId, 'story-dev', 'dev', 'step_error', { text: `selective regression: ${r.regressions.length} prior test(s) now failing: ${r.regressions.join(', ')}` }); } catch { /* telemetry */ }
             }
           } finally {
-            try { await driver.close?.(); } catch { /* best-effort */ }
+            try { await store.close?.(); } catch { /* best-effort */ }
           }
         } catch (e) {
           log('warn', `[${short}] selective-regression skipped (non-blocking): ${e.message}`);
@@ -6328,10 +6345,11 @@ const GATE_AGENT_ROLES = {
 const isScanRole = (role) =>
   !!role &&
   (role.startsWith('scan-analyzer') || role.startsWith('scan-xcut') || role === 'scan-report-writer');
-// One-time note: the Mycelium graph MCP serves a FIXED global Memgraph
-// (bolt://localhost:7687 in lib/mcp-config.mjs), NOT a per-scan-repo
-// cwd/graphify-out graph — so wiring it into scan agents would point them at the
-// wrong graph. We do the model upgrade only. (Logged once at first scan spawn.)
+// One-time note: the Mycelium graph MCP serves the project-partitioned graph
+// store (GRAPH_NODES_TABLE/GRAPH_EDGES_TABLE via lib/mcp-config.mjs), keyed by
+// projectId — NOT a per-scan-repo cwd/graphify-out graph — so wiring it into
+// scan agents would point them at the wrong graph. We do the model upgrade
+// only. (Logged once at first scan spawn.)
 let _scanMcpNoteLogged = false;
 
 async function spawnGateAgent({ role, prompt, cwd, round, jobId }, { short } = {}) {
@@ -6823,6 +6841,48 @@ async function executePartyTurnJob(job) {
     });
     log('error', `[${short}] party-turn failed: ${err?.message || err}`);
     throw err;
+  }
+}
+
+// B2 — File Explorer control job. List a directory or read a single file on
+// THIS daemon's local filesystem, confined to the server-scoped browse root,
+// and denormalize the result onto the job row so the API Lambda can relay it
+// (B4) without a second read. Synchronous fs work — completes in one tick, no
+// child process, no SSM.
+//
+// Failures are written as a TERMINAL FAILED (with errorMessage) and NOT
+// rethrown: a traversal reject / missing file / too-large is deterministic, so
+// bouncing it through the generic retry ladder would only make the waiting API
+// route time out (504) instead of surfacing the real error promptly (502).
+async function executeFileBrowseJob(job) {
+  const { jobId } = job;
+  const short = jobId.slice(0, 8);
+  // NOTE: we deliberately do NOT gate on B1's `validateFileBrowseJob` here —
+  // it rejects an empty `path`, but B4 sends `path: ''` to mean "default to
+  // this server's browse root" (the documented root-list contract). Instead
+  // `runFileBrowse` owns structural + path-safety validation (payload/op
+  // shape, `..`/metachar/root-escape rejection) and throws on anything bad.
+  const payload = job.fileBrowsePayload;
+  if (!payload || typeof payload !== 'object') {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: 'file-browse job rejected: fileBrowsePayload-missing',
+    });
+    log('error', `[${short}] file-browse rejected: fileBrowsePayload-missing`);
+    return;
+  }
+  const { op, path: browsePath } = payload;
+  log('info', `[${short}] file-browse op=${op} path=${browsePath || '<root>'}`);
+  try {
+    const fileBrowseResult = runFileBrowse(payload);
+    await updateJobFields(jobId, { status: 'COMPLETED', fileBrowseResult });
+    log('info', `[${short}] file-browse completed (op=${op})`);
+  } catch (err) {
+    await updateJobFields(jobId, {
+      status: 'FAILED',
+      errorMessage: err?.message || String(err),
+    });
+    log('error', `[${short}] file-browse failed: ${err?.message || err}`);
   }
 }
 
@@ -8277,6 +8337,74 @@ async function materializePlanWorkingDirIfMissing(job) {
   log('info', `[${short}] repo-materialize: clone complete → ${workingDir}`);
 }
 
+// C-3 (EU migration) — PARTY materialize-on-claim, sibling of
+// materializePlanWorkingDirIfMissing above. Party sessions carry host affinity
+// (`party:<projectId>`), but a turn can still land on a fleet host that has
+// never checked out the project — the first turn of a session whose bootstrap
+// ran on another box, or turn 2 after a handoff. This self-heals the base
+// project checkout BEFORE the party-turn pipeline forks its per-session
+// worktree off it. Rules, mirroring the plan-scoped helper:
+//   - `party-turn` ONLY. Every other job type early-returns fast — this runs
+//     on the pre-dispatch path EVERY job flows through, so the non-party exit
+//     must be cheap. `party-bootstrap` is excluded (it does its own clone, the
+//     same way `app-bootstrap` is excluded above);
+//   - brownfield (real GitHub repo) → clone via the per-project PAT, mirroring
+//     party-bootstrap.mjs runBrownfieldBootstrap's clone-repo step;
+//   - greenfield (local-only, no upstream) → THROW loudly. There is nothing to
+//     clone from, and running a turn against a missing tree corrupts state.
+async function materializePartyWorkingDirIfMissing(job) {
+  if (job.jobType !== 'party-turn') return;
+  const sessionId = job.partyTurnPayload?.sessionId;
+  if (!sessionId) return; // validatePartyTurnJob rejects this downstream.
+  const short = job.jobId.slice(0, 8);
+  const session = await partyGetSession(sessionId);
+  // runPartyTurn throws its own 'session not found' — don't duplicate it here.
+  if (!session?.projectId) return;
+  const project = await partyGetProject(session.projectId);
+  if (!project) {
+    throw new Error(
+      `party-materialize: no party-project row for '${session.projectId}' (PARTY_PROJECTS_TABLE) — cannot resolve a checkout to run turn ${sessionId.slice(0, 8)}`,
+    );
+  }
+  const checkoutPath = project.path || `${PARTY_PROJECTS_ROOT}/${session.projectId}`;
+  if (existsSync(checkoutPath)) return; // already materialized — the common case.
+
+  if (project.kind !== 'brownfield') {
+    // Greenfield party projects live only on the host that bootstrapped them;
+    // there is no upstream to clone. Fail loudly rather than run against a
+    // missing tree (session likely originated on a different host).
+    throw new Error(
+      `party-materialize: greenfield project '${session.projectId}' checkout ${checkoutPath} is missing on this host and has no upstream repo to clone — refusing to run party-turn`,
+    );
+  }
+  if (!project.gitRepoUrl) {
+    throw new Error(
+      `party-materialize: brownfield project '${session.projectId}' checkout ${checkoutPath} is missing but the row carries no gitRepoUrl — cannot clone`,
+    );
+  }
+  const token = await loadBrownfieldPat(project.patSecretName);
+  if (!token) {
+    throw new Error(
+      `party-materialize: PAT not loaded for ${project.patSecretName || '(legacy shared secret)'} — cannot clone brownfield project '${session.projectId}'`,
+    );
+  }
+  const branch = project.gitBranch || 'main';
+  const parentDir = pathJoin(checkoutPath, '..');
+  mkdirSync(parentDir, { recursive: true });
+  log(
+    'info',
+    `[${short}] party-materialize: checkout missing — cloning ${project.gitRepoUrl} (${branch}) → ${checkoutPath} for session ${sessionId.slice(0, 8)}`,
+  );
+  await cloneRepo({
+    repoUrl: project.gitRepoUrl,
+    branch,
+    token,
+    targetPath: checkoutPath,
+    depth: 50,
+  });
+  log('info', `[${short}] party-materialize: clone complete → ${checkoutPath}`);
+}
+
 async function runJobAsync(job) {
   // Task B (2026-07-17) — THE single path-remap seam. Rewrite every baked
   // fleet-absolute path (workingDir, *Payload path fields, legacy step
@@ -8369,6 +8497,10 @@ async function runJobAsync(job) {
     // Plan-scoped jobs only; a failure throws → handleJobFailure marks FAILED
     // (loud, no silent skip). Inactive on fleet/EC2 (remap off) — exact no-op.
     await materializePlanWorkingDirIfMissing(job);
+    // C-3 (EU migration) — party sibling: self-heal a party session's base
+    // checkout when a turn lands on a host that never cloned it. Cheap no-op
+    // for every non-party-turn job (early return on jobType).
+    await materializePartyWorkingDirIfMissing(job);
     if (handler === JOB_HANDLER_EPIC_DEV) {
       await executeEpicDevJob(job);
     } else if (handler === JOB_HANDLER_PARTY_BOOTSTRAP) {
@@ -8415,6 +8547,8 @@ async function runJobAsync(job) {
       await executeP3QaJob(job);
     } else if (handler === JOB_HANDLER_INTEGRATOR) {
       await executeIntegratorJob(job);
+    } else if (handler === JOB_HANDLER_FILE_BROWSE) {
+      await executeFileBrowseJob(job);
     } else {
       await executePipeline(job);
     }
@@ -9646,7 +9780,7 @@ async function executeScanEngineJob(job) {
         try {
           const s3mod = await import('@aws-sdk/client-s3');
           if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
-          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-knowledge-live-eu';
           const projectId = p.projectId || job.projectId;
           const res = await _s3Client.send(new s3mod.GetObjectCommand({ Bucket: bucket, Key: `knowledge-live/${projectId}/_refactor/scan.json` }));
           const body = await res.Body.transformToString();
@@ -9722,7 +9856,7 @@ async function executeScanEngineJob(job) {
     try {
       const s3mod = await import('@aws-sdk/client-s3');
       if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
-      const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+      const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-knowledge-live-eu';
       await _s3Client.send(
         new s3mod.PutObjectCommand({
           Bucket: bucket,
@@ -10043,7 +10177,7 @@ async function executeRefactorAuditJob(job) {
         if (existsSync(graphUiPath)) {
           const s3mod = await import('@aws-sdk/client-s3');
           if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
-          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+          const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-knowledge-live-eu';
           const projectId = job.refactorAuditPayload?.projectId || job.projectId;
           await _s3Client.send(
             new s3mod.PutObjectCommand({
@@ -10073,7 +10207,7 @@ async function executeRefactorAuditJob(job) {
             try {
               const s3mod = await import('@aws-sdk/client-s3');
               if (!_s3Client) _s3Client = new s3mod.S3Client({ region: REGION });
-              const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-ai-website';
+              const bucket = process.env.FUTURATOR_PUBLIC_BUCKET || 'futurator-knowledge-live-eu';
               const projectId = job.refactorAuditPayload?.projectId || job.projectId;
               if (pr.report) {
                 await _s3Client.send(

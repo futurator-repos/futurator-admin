@@ -5,7 +5,8 @@
  * `graph-sync.mjs` runs a CLI `main()` on import, so it can't be unit-tested
  * directly. Following the same reasoning that moved import resolution into
  * `lib/import-resolver.mjs`, the system-graph ingest logic lives here as pure,
- * session-driven functions that tests can drive with a fake session.
+ * store-driven functions that tests can drive with an in-memory GraphStore
+ * (S1.2, EU-migration: Memgraph/bolt is EXCISED — see `lib/graph-store.mjs`).
  *
  * Every system-graph node flows through the existing `:Node {nodeId}` model —
  * NO schema rewrite. New `kind` values (table | lambda | cron | secret | bucket
@@ -79,20 +80,21 @@ export const SYSTEM_GRAPH_NODE_PROPS = [
 ];
 
 /**
- * Idempotently ingest one extractor envelope into Memgraph.
+ * Idempotently ingest one extractor envelope into the graph store.
  *
- * Nodes are MERGE'd on `nodeId` (additive — re-running produces no duplicates).
- * Edges are MERGE'd between already-matched endpoints; a missing endpoint yields
- * zero rows (no throw) and is surfaced later by the orphan invariant rather than
- * silently inventing a node.
+ * Nodes are upserted on `nodeId` (full overwrite → re-running produces no
+ * duplicates). Edges only form between endpoints that already exist in the
+ * store; a missing endpoint yields no edge (no throw) and is surfaced later by
+ * the orphan invariant rather than silently inventing a node — the direct heir
+ * of the Memgraph `MATCH (a) MATCH (b) MERGE (a)-[r]->(b)` semantics.
  *
- * @param {object} session   Memgraph session (or a compatible fake in tests)
+ * @param {object} store     GraphStore instance (real Dynamo or in-memory fake)
  * @param {string} projectId
  * @param {object} doc       an extractor envelope ({ nodes, edges, ... })
  * @param {string} today     ISO date stamp (YYYY-MM-DD)
  * @returns {Promise<{nodeUpserts:number, edgeUpserts:number, skippedEdges:Array}>}
  */
-export async function upsertExtractedFacts(session, projectId, doc, today) {
+export async function upsertExtractedFacts(store, projectId, doc, today) {
   const nodes = Array.isArray(doc?.nodes) ? doc.nodes : [];
   const edges = Array.isArray(doc?.edges) ? doc.edges : [];
 
@@ -101,42 +103,33 @@ export async function upsertExtractedFacts(session, projectId, doc, today) {
   const skippedEdges = [];
 
   // ── Nodes ────────────────────────────────────────────────────────────
+  const nodeItems = [];
   for (const n of nodes) {
     if (!n || !n.nodeId || !n.kind) {
       skippedEdges.push({ reason: 'node-missing-id-or-kind', node: n?.nodeId ?? null });
       continue;
     }
 
-    const params = {
+    // Only allowlisted props that are actually present, so a partial
+    // re-extraction never clobbers an existing value with null. `buildNodeItem`
+    // (graph-store.mjs) filters `props` to SYSTEM_GRAPH_NODE_PROPS as well —
+    // this pre-filter keeps the persisted shape explicit at the ingest seam.
+    const props = {};
+    for (const prop of SYSTEM_GRAPH_NODE_PROPS) {
+      if (n[prop] !== undefined && n[prop] !== null) props[prop] = n[prop];
+    }
+
+    nodeItems.push({
       nodeId: n.nodeId,
       kind: n.kind,
       label: n.label ?? n.nodeId,
-      projectId,
-      today,
-    };
-
-    // Dynamic SET — only allowlisted props that are actually present, so we
-    // never clobber an existing value with null on a partial re-extraction.
-    const setFragments = [
-      'n.kind = $kind',
-      'n.label = $label',
-      'n.projectId = $projectId',
-      "n.status = 'active'",
-      'n.updated = $today',
-    ];
-    for (const prop of SYSTEM_GRAPH_NODE_PROPS) {
-      if (n[prop] !== undefined && n[prop] !== null) {
-        setFragments.push(`n.${prop} = $${prop}`);
-        params[prop] = n[prop];
-      }
-    }
-
-    await session.run(
-      `MERGE (n:Node {nodeId: $nodeId}) SET ${setFragments.join(', ')}`,
-      params,
-    );
+      status: 'active',
+      updated: today,
+      props,
+    });
     nodeUpserts++;
   }
+  if (nodeItems.length) await store.putNodes(projectId, nodeItems);
 
   // ── Edges ────────────────────────────────────────────────────────────
   for (const e of edges) {
@@ -149,14 +142,20 @@ export async function upsertExtractedFacts(session, projectId, doc, today) {
       continue;
     }
 
-    // MATCH both endpoints; MERGE the rel. If either endpoint is missing the
-    // query matches nothing and creates nothing — no error, surfaced by the
-    // orphan check (Epic 2) instead of a guessed node.
-    await session.run(
-      `MATCH (a:Node {nodeId: $s}) MATCH (b:Node {nodeId: $t})
-       MERGE (a)-[r:${e.type}]->(b) SET r.updated = $today`,
-      { s: e.source, t: e.target, today },
-    );
+    // Heir of `MATCH (a) MATCH (b) MERGE (a)-[r]->(b)`: the edge only forms when
+    // BOTH endpoints already exist. A missing endpoint creates nothing (no
+    // error) — surfaced by the orphan check (Epic 2), never a guessed node.
+    // `edgeUpserts` counts every allowlisted edge attempted (matching the old
+    // one-`.run()`-per-edge count), not only those actually persisted.
+    const [a, b] = await Promise.all([
+      store.getNode(projectId, e.source),
+      store.getNode(projectId, e.target),
+    ]);
+    if (a && b) {
+      await store.putEdges(projectId, [
+        { type: e.type, from: e.source, to: e.target, props: { updated: today } },
+      ]);
+    }
     edgeUpserts++;
   }
 
@@ -214,10 +213,13 @@ function resolveResourceRef(index, x) {
  * the accessor hop. W7: `Resource.GithubPat.value` and `process.env.GITHUB_PAT`
  * both resolve to `infra/secret/GithubPat` via name normalization.
  *
- * @param {object} infraDoc       infra-extract envelope (nodes + envJoin)
- * @param {object} envRefsByFile  ast-extract map { relPath: { env:[], resource:[] } }
+ * @param {object} store           GraphStore instance (real Dynamo or in-memory fake)
+ * @param {string} projectId
+ * @param {object} infraDoc        infra-extract envelope (nodes + envJoin)
+ * @param {object} envRefsByFile   ast-extract map { relPath: { env:[], resource:[] } }
+ * @param {string} today           ISO date stamp (YYYY-MM-DD)
  */
-export async function upsertEnvReads(session, projectId, infraDoc, envRefsByFile, today) {
+export async function upsertEnvReads(store, projectId, infraDoc, envRefsByFile, today) {
   const index = buildResourceIndex(infraDoc);
   let directReads = 0;
   let transitiveReads = 0;
@@ -239,29 +241,35 @@ export async function upsertEnvReads(session, projectId, infraDoc, envRefsByFile
     }
     if (targets.size === 0) continue;
 
-    // Direct READS on the file where the reference literally lives.
+    // Direct READS on the file where the reference literally lives. Heir of the
+    // `MATCH (f) MATCH (t) MERGE (f)-[r:READS]->(t)` — the edge forms only when
+    // both the file node and the target node exist; the counter still tracks
+    // every resolved target (matching the old per-target `.run()` count).
+    const fileNode = await store.getNode(projectId, fileNodeId);
     for (const [t, via] of targets) {
-      await session.run(
-        `MATCH (f:Node {nodeId: $f}) MATCH (t:Node {nodeId: $t})
-         MERGE (f)-[r:READS]->(t) SET r.via = $via, r.updated = $today`,
-        { f: fileNodeId, t, via, today },
-      );
+      const targetNode = fileNode ? await store.getNode(projectId, t) : null;
+      if (fileNode && targetNode) {
+        await store.putEdges(projectId, [
+          { type: 'READS', from: fileNodeId, to: t, props: { via, updated: today } },
+        ]);
+      }
       directReads++;
     }
 
-    // W4 accessor hop: attribute READS to inbound importers (the real consumers).
-    const imp = await session.run(
-      `MATCH (c:Node)-[:IMPORTS]->(f:Node {nodeId: $f}) RETURN c.nodeId AS id`,
-      { f: fileNodeId },
-    );
-    const importers = imp.records.map((rec) => rec.get('id')).filter(Boolean);
+    // W4 accessor hop: attribute READS to inbound importers (the real
+    // consumers). `(c)-[:IMPORTS]->(f)` → the file's inbound IMPORTS edges;
+    // each edge's `from` is the importing consumer.
+    const importEdges = await store.inEdges(projectId, fileNodeId, { type: 'IMPORTS' });
+    const importers = importEdges.map((e) => e.from).filter(Boolean);
     for (const c of importers) {
+      const consumerNode = await store.getNode(projectId, c);
       for (const [t, via] of targets) {
-        await session.run(
-          `MATCH (c:Node {nodeId: $c}) MATCH (t:Node {nodeId: $t})
-           MERGE (c)-[r:READS]->(t) SET r.via = $via, r.updated = $today`,
-          { c, t, via: `${fileNodeId} (${via})`, today },
-        );
+        const targetNode = consumerNode ? await store.getNode(projectId, t) : null;
+        if (consumerNode && targetNode) {
+          await store.putEdges(projectId, [
+            { type: 'READS', from: c, to: t, props: { via: `${fileNodeId} (${via})`, updated: today } },
+          ]);
+        }
         transitiveReads++;
       }
     }
@@ -332,15 +340,21 @@ export function matchCallsToEndpoints(calls, endpoints, { basePath = '' } = {}) 
  * frontend scan (extractApiCalls). A component→endpoint edge only forms when
  * both endpoints exist — same safety as upsertExtractedFacts.
  */
-export async function upsertCallsEndpoint(session, projectId, calls, endpoints, today, opts = {}) {
+export async function upsertCallsEndpoint(store, projectId, calls, endpoints, today, opts = {}) {
   const { edges, ambiguous } = matchCallsToEndpoints(calls, endpoints, opts);
   let edgeUpserts = 0;
   for (const e of edges) {
-    await session.run(
-      `MATCH (a:Node {nodeId: $s}) MATCH (b:Node {nodeId: $t})
-       MERGE (a)-[r:CALLS_ENDPOINT]->(b) SET r.updated = $today`,
-      { s: e.source, t: e.target, today },
-    );
+    // Same endpoint-existence safety as upsertExtractedFacts: the edge forms
+    // only when both the component and the endpoint node already exist.
+    const [a, b] = await Promise.all([
+      store.getNode(projectId, e.source),
+      store.getNode(projectId, e.target),
+    ]);
+    if (a && b) {
+      await store.putEdges(projectId, [
+        { type: 'CALLS_ENDPOINT', from: e.source, to: e.target, props: { updated: today } },
+      ]);
+    }
     edgeUpserts++;
   }
   return { edgeUpserts, ambiguous };

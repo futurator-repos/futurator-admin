@@ -7,8 +7,8 @@
  *   3. debt-registry.md    — tech debt items with severity and origin
  *   4. deployment-manifest.md — deployed vs. pending deployment status
  *
- * Uses neo4j-driver to query Memgraph for node data. Each article gets
- * proper frontmatter (type: system, phase: system).
+ * Reads node/edge data from the graph store (bolt EXCISED, EU-migration S2.2).
+ * Each article gets proper frontmatter (type: system, phase: system).
  *
  * Usage:
  *   node generate-system-articles.mjs --project <projectId> --knowledge-dir <dir>
@@ -19,7 +19,7 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#5.2-GraphRAG-Query-Patterns]
  */
 
-import { createDriver } from './lib/memgraph-driver.mjs';
+import { createGraphStore } from './lib/graph-store.mjs';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
@@ -92,45 +92,46 @@ function toString(val) {
   return String(val);
 }
 
-// ── Memgraph Connection ──
+// ── Graph store ──
+// Bolt/Memgraph EXCISED (EU-migration S2.2). Each generator reads the project's
+// nodes/edges once from the GraphStore (DynamoDB when GRAPH_*_TABLE resolve, else
+// in-memory) and shapes them in JS. `rec()` re-exposes the legacy
+// `record.get(field)` accessor so the downstream section-building loops are
+// unchanged.
 
-const driver = createDriver();
+const store = await createGraphStore();
 
-async function runQuery(cypher, params = {}) {
-  const session = driver.session();
-  try {
-    const result = await session.run(cypher, params);
-    return result.records;
-  } finally {
-    await session.close();
-  }
+let _nodesCache = null;
+async function allNodes() {
+  if (!_nodesCache) _nodesCache = await store.listNodes(projectId);
+  return _nodesCache;
 }
+
+/** Wrap a plain object as a neo4j-style record so downstream `.get(k)` still works. */
+const rec = (o) => ({ get: (k) => o[k] });
+
+/** Read a node field, falling back to the allowlisted `props` bag. */
+const nField = (n, k) => n?.[k] ?? n?.props?.[k];
+const nType = (n) => nField(n, 'type') ?? n?.kind;
+const nMaturity = (n) => { const v = Number(nField(n, 'maturity')); return Number.isFinite(v) ? v : NaN; };
+
+/** Phase-order sort key (heir of the Cypher CASE ladder). */
+const PHASE_RANK = { discovery: 1, planning: 2, solutioning: 3, implementation: 4, qa: 5, release: 6, support: 7 };
 
 // ── 1. Pending Work ──
 
 async function generatePendingWork() {
   console.log('Generating pending-work.md ...');
 
-  const records = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.status IN ['active', 'flagged']
-      AND n.maturity < 0.6
-    RETURN n.nodeId AS nodeId, n.type AS type, n.phase AS phase,
-           n.title AS title, n.maturity AS maturity, n.status AS status,
-           n.flagReason AS flagReason, n.flagSeverity AS flagSeverity
-    ORDER BY
-      CASE n.phase
-        WHEN 'discovery' THEN 1
-        WHEN 'planning' THEN 2
-        WHEN 'solutioning' THEN 3
-        WHEN 'implementation' THEN 4
-        WHEN 'qa' THEN 5
-        WHEN 'release' THEN 6
-        WHEN 'support' THEN 7
-      END ASC,
-      n.maturity ASC
-  `, { projectId });
+  const records = (await allNodes())
+    .filter((n) => ['active', 'flagged'].includes(n.status ?? 'active') && Number.isFinite(nMaturity(n)) && nMaturity(n) < 0.6)
+    .map((n) => ({
+      nodeId: n.nodeId, type: nType(n), phase: nField(n, 'phase'),
+      title: n.title ?? nField(n, 'title'), maturity: nMaturity(n), status: n.status,
+      flagReason: nField(n, 'flagReason'), flagSeverity: nField(n, 'flagSeverity'),
+    }))
+    .sort((a, b) => (PHASE_RANK[a.phase] ?? 99) - (PHASE_RANK[b.phase] ?? 99) || (a.maturity - b.maturity))
+    .map(rec);
 
   // Group by phase
   const byPhase = {};
@@ -192,15 +193,19 @@ async function generatePendingWork() {
 async function generateDependencyMap() {
   console.log('Generating dependency-map.md ...');
 
-  const records = await runQuery(`
-    MATCH (a:Node)-[r:DEPENDS_ON]->(b:Node)
-    WHERE a.projectId = $projectId
-      AND a.status IN ['active', 'flagged', 'deployed']
-    RETURN a.nodeId AS fromId, a.title AS fromTitle,
-           b.nodeId AS toId, b.title AS toTitle,
-           a.type AS fromType, b.type AS toType
-    ORDER BY a.nodeId, b.nodeId
-  `, { projectId });
+  const nodesById = new Map((await allNodes()).map((n) => [n.nodeId, n]));
+  const records = (await store.listEdges(projectId))
+    .filter((e) => e.type === 'DEPENDS_ON')
+    .filter((e) => { const a = nodesById.get(e.from); return a && ['active', 'flagged', 'deployed'].includes(a.status ?? 'active'); })
+    .sort((x, y) => x.from.localeCompare(y.from) || x.to.localeCompare(y.to))
+    .map((e) => {
+      const a = nodesById.get(e.from), b = nodesById.get(e.to);
+      return rec({
+        fromId: e.from, fromTitle: a?.title ?? nField(a, 'title') ?? '',
+        toId: e.to, toTitle: b?.title ?? nField(b, 'title') ?? '',
+        fromType: nType(a) ?? '', toType: nType(b) ?? '',
+      });
+    });
 
   // Build adjacency map
   const deps = new Map(); // nodeId -> { title, type, dependsOn: [{nodeId, title}] }
@@ -315,18 +320,17 @@ async function appendDependencyEdges(newEdges) {
 async function generateDebtRegistry() {
   console.log('Generating debt-registry.md ...');
 
-  // Query nodes that may have tech debt indicators
-  const records = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.status IN ['active', 'flagged']
-    RETURN n.nodeId AS nodeId, n.type AS type, n.phase AS phase,
-           n.title AS title, n.maturity AS maturity,
-           n.createdByStory AS createdByStory,
-           n.createdByEpic AS createdByEpic,
-           n.summary AS summary
-    ORDER BY n.maturity ASC
-  `, { projectId });
+  // Nodes that may have tech debt indicators (active/flagged), by maturity asc.
+  const records = (await allNodes())
+    .filter((n) => ['active', 'flagged'].includes(n.status ?? 'active'))
+    .map((n) => ({
+      nodeId: n.nodeId, type: nType(n), phase: nField(n, 'phase'),
+      title: n.title ?? nField(n, 'title'), maturity: Number.isFinite(nMaturity(n)) ? nMaturity(n) : 0,
+      createdByStory: nField(n, 'createdByStory'), createdByEpic: nField(n, 'createdByEpic'),
+      summary: nField(n, 'summary'),
+    }))
+    .sort((a, b) => a.maturity - b.maturity)
+    .map(rec);
 
   // Classify debt items by severity
   // - Critical: maturity < 0.2 or explicit critical markers
@@ -412,47 +416,30 @@ async function generateDebtRegistry() {
 async function generateDeploymentManifest() {
   console.log('Generating deployment-manifest.md ...');
 
-  // Deployed articles
-  const deployedRecords = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.status = 'deployed'
-      AND n.type = 'code'
-    RETURN n.nodeId AS nodeId, n.title AS title,
-           n.createdByEpic AS epic, n.updated AS deployDate
-    ORDER BY n.updated DESC
-  `, { projectId });
+  const nodes = await allNodes();
+  const codeOfStatus = (status) => nodes.filter((n) => n.status === status && nType(n) === 'code');
+
+  // Deployed articles (by deploy date desc)
+  const deployedRecords = codeOfStatus('deployed')
+    .sort((a, b) => String(nField(b, 'updated') ?? '').localeCompare(String(nField(a, 'updated') ?? '')))
+    .map((n) => rec({ nodeId: n.nodeId, title: n.title ?? nField(n, 'title'), epic: nField(n, 'createdByEpic'), deployDate: nField(n, 'updated') }));
 
   // Pending deployment (active code articles)
-  const pendingRecords = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.status = 'active'
-      AND n.type = 'code'
-    RETURN n.nodeId AS nodeId, n.title AS title,
-           n.createdByEpic AS epic
-    ORDER BY n.nodeId
-  `, { projectId });
+  const pendingRecords = codeOfStatus('active')
+    .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+    .map((n) => rec({ nodeId: n.nodeId, title: n.title ?? nField(n, 'title'), epic: nField(n, 'createdByEpic') }));
 
   // Superseded articles
-  const supersededRecords = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.status = 'superseded'
-      AND n.type = 'code'
-    RETURN n.nodeId AS nodeId, n.title AS title
-    ORDER BY n.nodeId
-  `, { projectId });
+  const supersededRecords = codeOfStatus('superseded')
+    .sort((a, b) => a.nodeId.localeCompare(b.nodeId))
+    .map((n) => rec({ nodeId: n.nodeId, title: n.title ?? nField(n, 'title') }));
 
   // Latest deploy record
-  const deployRecordResults = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.projectId = $projectId
-      AND n.type = 'deployment-record'
-    RETURN n.nodeId AS nodeId, n.title AS title, n.created AS created
-    ORDER BY n.created DESC
-    LIMIT 1
-  `, { projectId });
+  const deployRecordResults = nodes
+    .filter((n) => nType(n) === 'deployment-record')
+    .sort((a, b) => String(nField(b, 'created') ?? '').localeCompare(String(nField(a, 'created') ?? '')))
+    .slice(0, 1)
+    .map((n) => rec({ nodeId: n.nodeId, title: n.title ?? nField(n, 'title'), created: nField(n, 'created') }));
 
   const deployedCount = deployedRecords.length;
   const pendingCount = pendingRecords.length;
@@ -569,7 +556,7 @@ async function main() {
     console.error(err.stack);
     process.exit(1);
   } finally {
-    await driver.close();
+    await store.close?.();
   }
 }
 

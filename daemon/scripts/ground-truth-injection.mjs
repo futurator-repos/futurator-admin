@@ -7,12 +7,13 @@
  * agent edits with structural awareness and stops breaking unseen dependents
  * (incl. the W5 async event chains).
  *
- * This is ADDITIVE context, not a new gate. On a cold Memgraph (no session, or
- * the query throws) it degrades to the caller-supplied `fallback` (the existing
+ * This is ADDITIVE context, not a new gate. On a cold graph (no store, or the
+ * query throws) it degrades to the caller-supplied `fallback` (the existing
  * ast-extract facts + grep) and NEVER fails the story.
  *
- * Pure formatting + a thin async orchestrator, both unit-tested with a fake
- * session — the live wiring imports `blastRadius` + a real Bolt session.
+ * Pure formatting + a thin async orchestrator, both unit-tested with the memory
+ * store — the live wiring imports `blastRadius` + a GraphStore instance (bolt
+ * EXCISED, EU-migration S2.2).
  */
 
 import { blastRadius } from '../mcp/mycelium-mcp.mjs';
@@ -74,7 +75,7 @@ const KIND_ORDER = {
  * @param {string[]} args.touchPoints - story touch-point file paths (or nodeIds).
  * @param {string} args.projectId
  * @param {object} [ctx]
- * @param {object} [ctx.session] - live Bolt session; null/absent ⇒ cold Memgraph.
+ * @param {object} [ctx.store] - GraphStore instance; null/absent ⇒ cold graph.
  * @param {() => (string|Promise<string>)} [ctx.fallback] - existing ast+grep facts.
  * @param {(msg:string)=>void} [ctx.logger]
  * @returns {Promise<{block:string, source:'blast_radius'|'fallback', reached:number}>}
@@ -86,14 +87,14 @@ export async function assembleGroundTruth({ touchPoints, projectId }, ctx = {}) 
     return { block: fb || '', source: 'fallback', reached: 0 };
   };
 
-  if (!ctx.session) return fallbackBlock('no Memgraph session');
+  if (!ctx.store) return fallbackBlock('no graph store');
   const fileIds = (touchPoints ?? []).map((tp) =>
     tp.startsWith('code/') ? tp : touchPointToNodeId(tp),
   );
   if (fileIds.length === 0) return fallbackBlock('no touch points');
 
   try {
-    const blast = await blastRadius(ctx.session, { files: fileIds, projectId });
+    const blast = await blastRadius(ctx.store, { files: fileIds, projectId });
     if (!blast || blast.totalReached === 0) {
       // Nothing connected (new files, or cold/empty graph) → keep ast+grep facts.
       return fallbackBlock('empty blast radius');

@@ -136,7 +136,7 @@ describe('runStoryCompileGraph', () => {
 
   it('reports graphUpdated:false with a reason when compile-sync fails', async () => {
     const spawn = makeSpawn((file, args, inv) => {
-      if (inv.command && /graph-sync/.test(inv.command)) return { code: 1, stdout: 'memgraph down' };
+      if (inv.command && /graph-sync/.test(inv.command)) return { code: 1, stdout: 'graph store write failed' };
       return { stdout: 'A\tx.ts\n', code: 0 };
     });
 

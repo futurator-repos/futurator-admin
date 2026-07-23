@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { bareRepoPath, LEGACY_PROJECTS_ROOT } from '../../lib/story-worktree.mjs';
+import { isRemapActive } from '../../lib/path-remap.mjs';
 
 const WORKTREE_ROOT =
   process.env.FUTURATOR_WORKTREE_ROOT || '/home/ubuntu/worktrees';
@@ -62,12 +63,21 @@ export function partyBranchName(projectId, sessionIdShort) {
 }
 
 /**
- * Run a git command as the `ubuntu` user. Returns `{ code, stdout, stderr }`.
- * Does NOT throw on non-zero — callers branch on `code`.
+ * Run a git command as `ubuntu` (the daemon's user) and capture output.
+ * Returns { code, stdout, stderr }. Does NOT throw on non-zero — callers
+ * branch on `code`.
  */
 function runGit(args, cwd) {
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', '-u', 'ubuntu', 'git', ...args], {
+    // `sudo -u ubuntu` is required when SSM-relayed callers (e.g. the
+    // reaper invoked from a CloudWatch event) run as root. The daemon's
+    // own process IS ubuntu, in which case sudo is a no-op cost. On remapped
+    // hosts (Mac / non-fleet, via isRemapActive) there is no `ubuntu` user —
+    // run git directly as the operator user.
+    const [bin, argv] = isRemapActive()
+      ? ['git', args]
+      : ['sudo', ['-n', '-u', 'ubuntu', 'git', ...args]];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

@@ -4,8 +4,8 @@
  * Floating Action Button that opens the free-agent chat panel.
  *
  * - 56×56px circular, fixed bottom-right, z-index 50.
- * - Disabled + greyed when EC2 mode is local (read from localStorage to match
- *   the existing Ec2Toggle source-of-truth pattern at
+ * - Disabled + greyed when Fleet mode (remote daemon) is off (read from
+ *   localStorage to match the existing Ec2Toggle source-of-truth pattern at
  *   `src/components/labs/ec2-toggle.tsx:7-19`).
  *
  * Motion polish (breathing pulse) deferred to Story 18.7.
@@ -17,9 +17,11 @@ import { useEffect, useState } from 'react';
 import { MessageSquare, Sparkles } from 'lucide-react';
 import { useFreeAgentStore } from '@/stores/free-agent-store';
 
+// Storage key + value are load-bearing wire values shared with
+// DAEMON_SOURCE/QueueTarget/concurrency flags — do NOT rename either.
 const EC2_MODE_STORAGE_KEY = 'futurator.labs.runtimeMode';
 
-function readEc2Mode(): 'local' | 'ec2' {
+function readRemoteMode(): 'local' | 'ec2' {
   if (typeof window === 'undefined') return 'local';
   return (window.localStorage.getItem(EC2_MODE_STORAGE_KEY) as 'local' | 'ec2') || 'local';
 }
@@ -29,14 +31,15 @@ export function FreeAgentFab() {
 
   // Mirror the Ec2Toggle storage so we don't import its component-local state.
   // Lazy initializer reads localStorage once on first render (SSR-safe — no
-  // window access inside the initializer thanks to readEc2Mode's typeof guard).
-  // Effects only respond to *external* changes (storage events / window focus).
-  const [ec2Mode, setEc2Mode] = useState<'local' | 'ec2'>(readEc2Mode);
+  // window access inside the initializer thanks to readRemoteMode's typeof
+  // guard). Effects only respond to *external* changes (storage events /
+  // window focus).
+  const [remoteMode, setRemoteMode] = useState<'local' | 'ec2'>(readRemoteMode);
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === EC2_MODE_STORAGE_KEY) setEc2Mode(readEc2Mode());
+      if (e.key === EC2_MODE_STORAGE_KEY) setRemoteMode(readRemoteMode());
     };
-    const onFocus = () => setEc2Mode(readEc2Mode());
+    const onFocus = () => setRemoteMode(readRemoteMode());
     window.addEventListener('storage', onStorage);
     window.addEventListener('focus', onFocus);
     return () => {
@@ -45,7 +48,7 @@ export function FreeAgentFab() {
     };
   }, []);
 
-  const isDisabled = ec2Mode !== 'ec2';
+  const isDisabled = remoteMode !== 'ec2';
 
   const handleClick = () => {
     if (isDisabled) return;
@@ -56,7 +59,7 @@ export function FreeAgentFab() {
     <button
       type="button"
       aria-label="Open free agent"
-      title={isDisabled ? 'Switch to EC2 to use the free agent' : 'Open free agent'}
+      title={isDisabled ? 'Switch to Fleet (remote daemon)…' : 'Open free agent'}
       data-testid="free-agent-fab"
       data-disabled={isDisabled ? 'true' : 'false'}
       onClick={handleClick}

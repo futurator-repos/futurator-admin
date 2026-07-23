@@ -18,7 +18,7 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
-import { createDriver } from './lib/memgraph-driver.mjs';
+import { createGraphStore } from './lib/graph-store.mjs';
 import {
   parseFrontmatter,
   serializeFrontmatter,
@@ -570,30 +570,20 @@ export async function decomposeRequirements(prdPath, knowledgeDir, opts = {}) {
     maturityScore: `${allReqs.length} reqs extracted`,
   });
 
-  // If Memgraph is available, verify DERIVED_FROM edges
+  // Best-effort verify of the DERIVED_FROM (req → prd) edges via the graph store.
+  // Bolt EXCISED (S2.2): read the prd's in-edges of type DERIVED_FROM.
   let edgeResults = [];
   try {
-    const driver = createDriver();
-    const session = driver.session();
-    try {
-      // Verify edges after graph-sync would have run
-      const result = await session.run(
-        `MATCH (req:Node {type: 'requirement'})-[e:DERIVED_FROM]->(prd:Node {type: 'prd'})
-         WHERE prd.nodeId = $prdNodeId
-         RETURN req.nodeId AS reqNodeId, prd.nodeId AS prdNodeId, e.weight AS weight`,
-        { prdNodeId }
-      );
-      edgeResults = result.records.map(r => ({
-        reqNodeId: r.get('reqNodeId'),
-        prdNodeId: r.get('prdNodeId'),
-        weight: r.get('weight'),
-      }));
-    } finally {
-      await session.close();
-    }
-    await driver.close();
+    const store = await createGraphStore();
+    const inbound = await store.inEdges(opts.projectId, prdNodeId, { type: 'DERIVED_FROM' });
+    edgeResults = inbound.map((e) => ({
+      reqNodeId: e.from,
+      prdNodeId,
+      weight: e.props?.weight,
+    }));
+    await store.close?.();
   } catch {
-    // Memgraph not available; edges will be created by graph-sync.mjs
+    // Graph store not available; edges will be created by graph-sync.mjs
   }
 
   return {

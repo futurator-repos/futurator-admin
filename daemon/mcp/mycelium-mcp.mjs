@@ -1,19 +1,28 @@
 /**
  * Mycelium-MCP — the graph as an agent tool (Epic 4, PRD §5.5 / Appendix D).
  *
- * Pipeline DEV agents query the system graph as MCP tools instead of grepping:
+ * Pipeline DEV agents query the system graph as MCP tools instead of grepping.
+ * The graph source of truth is the DynamoDB-backed `GraphStore` (Story S0.2,
+ * EU-migration keystone KD-1) — Memgraph/bolt is EXCISED. The store runs from
+ * ANY fleet host (per-server IAM keys) AND from Lambda; bolt never could.
  *
- *   - query_graph(question, projectId)  → wraps search-cascade.mjs (Story 4.1)
- *   - get_node(nodeId, projectId)       → one node + its degree
- *   - neighbors(nodeId, projectId, dir) → adjacent nodes by edge type
- *   - blast_radius(files[], projectId)  → ≤2-hop cross-stack reach, grouped by
+ * Tools:
+ *   - query_graph(question, projectId)   → wraps search-cascade.mjs (Story 4.1)
+ *   - get_node(nodeId, projectId)        → one node + its incident degree
+ *   - neighbors(nodeId, projectId, dir)  → adjacent nodes by edge type
+ *   - transitive_reach(files[], projectId) → ≤N-hop cross-stack reach, grouped by
  *       kind, INCLUDING the W5 event edges so async S3/SNS/cron chains are never
- *       a false "all-clear" (Story 4.2)
+ *       a false "all-clear" (was `blast_radius`; alias kept)
+ *   - get_file_symbols(file, projectId)  → symbols declared in a file (file-index)
+ *   - list_kind(kind, projectId)         → all nodes of a kind (kind-index)
+ *   - dependency_subgraph(root, …)       → BFS-out subgraph (depth≤3, cap 500)
+ *   - path_between(from, to, …)          → bidirectional meet-in-middle path (≤12)
  *   - god_nodes / orphans / shortest_path                        (Story 4.2)
  *
- * DESIGN (mirrors the Epic 2/3 pure-lib + fake-session pattern):
- *   - The tool LOGIC lives in exported functions that take a Bolt `session`, so
- *     they unit-test against a fake graph with no live Memgraph/MAGE.
+ * DESIGN (mirrors the Epic 2/3 pure-lib + store pattern):
+ *   - The tool LOGIC lives in exported functions that take a `GraphStore`, so
+ *     they unit-test against the in-memory store (`graph-store-memory.mjs`) with
+ *     no live DynamoDB.
  *   - `TOOL_DEFS` + `dispatchTool` are the transport-agnostic surface.
  *   - The actual MCP **stdio transport** is bootstrapped only when this file is
  *     run as a server; the `@modelcontextprotocol/sdk` import is DYNAMIC so the
@@ -25,7 +34,7 @@
  */
 
 import { searchCascade } from '../scripts/search-cascade.mjs';
-import { createDriver } from '../scripts/lib/memgraph-driver.mjs';
+import { createGraphStore } from '../scripts/lib/graph-store.mjs';
 import { appendTelemetry, buildTelemetryRecord } from './telemetry.mjs';
 
 // ── blast-radius edge set (Story 4.2 AC / Appendix D) ───────────────────────
@@ -38,18 +47,49 @@ export const BLAST_EDGE_TYPES = [
   'TRIGGERS', 'SUBSCRIBES', 'EMITS', 'IMPORTS',
 ];
 
-// ── Tool implementations (session-injected, unit-testable) ──────────────────
+// ── small helpers (plain JS — no neo4j scalar coercion any more) ─────────────
+
+function numOrNull(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+function intOrNull(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null;
+}
+/** Positive integer with a default fallback (replaces the old neo4j `intParam`). */
+function clampInt(v, dflt) {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+const shape = (n, id) => ({
+  id,
+  kind: n?.kind || 'file',
+  title: n?.title ?? id,
+});
+
+/** Undirected adjacency of a node: both out- and in-edges, as {id, type}. */
+async function undirectedAdj(store, projectId, id) {
+  const [out, inc] = await Promise.all([
+    store.outEdges(projectId, id),
+    store.inEdges(projectId, id),
+  ]);
+  const adj = [];
+  for (const e of out) adj.push({ id: e.to, type: e.type });
+  for (const e of inc) adj.push({ id: e.from, type: e.type });
+  return adj;
+}
+
+// ── Tool implementations (store-injected, unit-testable) ─────────────────────
 
 /**
  * query_graph — Story 4.1. Thin wrapper over the 4-layer search cascade. Returns
  * the structured cascade result (graph nodes + wiki + grep + source files).
- * Cold-Memgraph degradation is the cascade's own job (Layer 1 → grep/read).
+ * Cold-store degradation is the cascade's own job (Layer 1 → grep/read).
  *
  * @param {object} ctx - { cascade?, workingDir }. `cascade` is injectable for tests.
  */
 export async function queryGraph({ question, projectId, maxLayer = 4 }, ctx = {}) {
   const run = ctx.cascade ?? searchCascade;
-  const workingDir = ctx.workingDir ?? `/home/ubuntu/projects/${projectId}`;
+  const workingDir = ctx.workingDir ?? `projects/${projectId}`;
   const result = await run(projectId, question, workingDir, { maxLayer });
   return {
     projectId,
@@ -66,129 +106,288 @@ export async function queryGraph({ question, projectId, maxLayer = 4 }, ctx = {}
   };
 }
 
-/** get_node — one node plus its incident degree. */
-export async function getNode(session, { nodeId, projectId }) {
-  const r = await session.run(
-    `MATCH (n:Node {nodeId: $nodeId, projectId: $projectId})
-     OPTIONAL MATCH (n)--(m:Node)
-     RETURN n.nodeId AS id, coalesce(n.kind,'file') AS kind, n.title AS title,
-            n.centrality AS centrality, n.community AS community,
-            count(DISTINCT m) AS degree`,
-    { nodeId, projectId },
-  );
-  if (r.records.length === 0) return null;
-  const rec = r.records[0];
+/** get_node — one node plus its incident (undirected) degree. */
+export async function getNode(store, { nodeId, projectId }) {
+  const node = await store.getNode(projectId, nodeId);
+  if (!node) return null;
+  const [out, inc] = await Promise.all([
+    store.outEdges(projectId, nodeId),
+    store.inEdges(projectId, nodeId),
+  ]);
+  const neighborIds = new Set();
+  for (const e of out) neighborIds.add(e.to);
+  for (const e of inc) neighborIds.add(e.from);
   return {
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-    title: rec.get('title') ?? rec.get('id'),
-    centrality: numOrNull(rec.get('centrality')),
-    community: intOrNull(rec.get('community')),
-    degree: intOrNull(rec.get('degree')) ?? 0,
+    id: node.nodeId,
+    kind: node.kind || 'file',
+    title: node.title ?? node.nodeId,
+    centrality: numOrNull(node.centrality),
+    community: intOrNull(node.community),
+    degree: neighborIds.size,
   };
 }
 
 /** neighbors — adjacent nodes by edge type. dir: 'out' | 'in' | 'any' (default). */
-export async function neighbors(session, { nodeId, projectId, dir = 'any', limit = 100 }) {
-  const arrow =
-    dir === 'out' ? '-[rel]->' : dir === 'in' ? '<-[rel]-' : '-[rel]-';
-  const r = await session.run(
-    `MATCH (n:Node {nodeId: $nodeId, projectId: $projectId})${arrow}(m:Node)
-     RETURN type(rel) AS type, m.nodeId AS id, coalesce(m.kind,'file') AS kind,
-            coalesce(m.title, m.nodeId) AS title
-     LIMIT $limit`,
-    { nodeId, projectId, limit: intParam(limit) },
-  );
-  return r.records.map((rec) => ({
-    type: rec.get('type'),
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-    title: rec.get('title'),
-  }));
+export async function neighbors(store, { nodeId, projectId, dir = 'any', limit = 100 }) {
+  const lim = clampInt(limit, 100);
+  let raw = [];
+  if (dir === 'out') {
+    for (const e of await store.outEdges(projectId, nodeId)) raw.push({ type: e.type, id: e.to });
+  } else if (dir === 'in') {
+    for (const e of await store.inEdges(projectId, nodeId)) raw.push({ type: e.type, id: e.from });
+  } else {
+    for (const e of await store.outEdges(projectId, nodeId)) raw.push({ type: e.type, id: e.to });
+    for (const e of await store.inEdges(projectId, nodeId)) raw.push({ type: e.type, id: e.from });
+  }
+  raw = raw.slice(0, lim);
+  const ids = [...new Set(raw.map((r) => r.id))];
+  const hydrated = new Map();
+  await Promise.all(ids.map(async (id) => hydrated.set(id, await store.getNode(projectId, id))));
+  return raw.map((r) => ({ type: r.type, ...shape(hydrated.get(r.id), r.id) }));
 }
 
 /**
- * blast_radius — Story 4.2. All nodes reachable in ≤2 hops from the changed
- * files via the cross-stack edge set (incl. W5 event edges), grouped by kind.
+ * transitive_reach (was blast_radius) — Story 4.2. All nodes reachable in ≤N hops
+ * (default 2, max 4) from the changed files via the cross-stack edge set (incl.
+ * the W5 event edges), grouped by kind, undirected. `touchesPaidService` reads
+ * the W10 `billable` prop off any reached node.
  *
  * @returns {Promise<{projectId, files, totalReached, groups, touchesPaidService}>}
  */
-export async function blastRadius(session, { files, projectId, hops = 2 }) {
+export async function transitiveReach(store, { files, projectId, hops = 2 }) {
   const fileIds = Array.isArray(files) ? files : [files];
-  const hopsSafe = Math.max(1, Math.min(4, Math.floor(hops)));
-  const relFilter = BLAST_EDGE_TYPES.join('|');
-  const r = await session.run(
-    `MATCH (f:Node {projectId: $projectId}) WHERE f.nodeId IN $fileIds
-     MATCH (f)-[:${relFilter}*1..${hopsSafe}]-(x:Node {projectId: $projectId})
-     WHERE NOT x.nodeId IN $fileIds
-     RETURN DISTINCT x.nodeId AS id, coalesce(x.kind,'file') AS kind,
-            coalesce(x.title, x.nodeId) AS title, x.billable AS billable
-     ORDER BY kind, id`,
-    { projectId, fileIds },
-  );
+  const hopsSafe = Math.max(1, Math.min(4, Math.floor(Number(hops) || 2)));
+  const blast = new Set(BLAST_EDGE_TYPES);
+  const seed = new Set(fileIds);
+  const visited = new Set(fileIds);
+  const reached = new Set();
+  let frontier = [...fileIds];
+
+  for (let h = 0; h < hopsSafe && frontier.length; h++) {
+    const next = [];
+    await Promise.all(
+      frontier.map(async (id) => {
+        const [out, inc] = await Promise.all([
+          store.outEdges(projectId, id),
+          store.inEdges(projectId, id),
+        ]);
+        const nbrs = [];
+        for (const e of out) if (blast.has(e.type)) nbrs.push(e.to);
+        for (const e of inc) if (blast.has(e.type)) nbrs.push(e.from);
+        for (const nid of nbrs) {
+          if (visited.has(nid)) continue;
+          visited.add(nid);
+          next.push(nid);
+          if (!seed.has(nid)) reached.add(nid);
+        }
+      }),
+    );
+    frontier = next;
+  }
+
+  const reachedIds = [...reached].sort();
+  const nodes = await Promise.all(reachedIds.map((id) => store.getNode(projectId, id)));
   const groups = {};
   let touchesPaidService = false;
-  for (const rec of r.records) {
-    const kind = rec.get('kind') || 'file';
-    (groups[kind] ??= []).push({ id: rec.get('id'), title: rec.get('title') });
-    if (rec.get('billable') === true) touchesPaidService = true;
+  for (let i = 0; i < reachedIds.length; i++) {
+    const id = reachedIds[i];
+    const n = nodes[i];
+    const kind = n?.kind || 'file';
+    (groups[kind] ??= []).push({ id, title: n?.title ?? id });
+    if (n?.props?.billable === true) touchesPaidService = true;
   }
   const totalReached = Object.values(groups).reduce((s, g) => s + g.length, 0);
   return { projectId, files: fileIds, totalReached, groups, touchesPaidService };
 }
 
-/** god_nodes — top centrality nodes for a project (Epic 3 metric, read-only). */
-export async function godNodes(session, { projectId, limit = 15 }) {
-  const r = await session.run(
-    `MATCH (n:Node {projectId: $projectId})
-     WHERE n.centrality IS NOT NULL AND n.centrality > 0
-     RETURN n.nodeId AS id, coalesce(n.kind,'file') AS kind,
-            coalesce(n.title, n.nodeId) AS title, n.centrality AS centrality
-     ORDER BY centrality DESC, id LIMIT $limit`,
-    { projectId, limit: intParam(limit) },
-  );
-  return r.records.map((rec) => ({
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-    title: rec.get('title'),
-    centrality: numOrNull(rec.get('centrality')),
-  }));
+/** Backwards-compatible alias for the renamed tool. */
+export const blastRadius = transitiveReach;
+
+/** get_file_symbols — every node declared in a file (file-index / queryByFile). */
+export async function getFileSymbols(store, { file, projectId }) {
+  const nodes = await store.queryByFile(projectId, file);
+  return nodes.map((n) => ({ ...shape(n, n.nodeId), centrality: numOrNull(n.centrality) }));
 }
 
-/** orphans — degree-0 active nodes (the "no alone dots" invariant, read-only). */
-export async function orphans(session, { projectId, limit = 100 }) {
-  const r = await session.run(
-    `MATCH (n:Node {projectId: $projectId})
-     WHERE NOT (n)--() AND coalesce(n.status,'active') <> 'pruned'
-     RETURN n.nodeId AS id, coalesce(n.kind,'file') AS kind,
-            coalesce(n.title, n.nodeId) AS title
-     LIMIT $limit`,
-    { projectId, limit: intParam(limit) },
-  );
-  return r.records.map((rec) => ({
-    id: rec.get('id'),
-    kind: rec.get('kind') || 'file',
-    title: rec.get('title'),
-  }));
+/** list_kind — all nodes of a given kind for a project (kind-index / queryByKind). */
+export async function listKind(store, { kind, projectId, limit = 200 }) {
+  const lim = clampInt(limit, 200);
+  const nodes = await store.queryByKind(projectId, kind);
+  return nodes
+    .slice(0, lim)
+    .map((n) => ({ ...shape(n, n.nodeId), centrality: numOrNull(n.centrality) }));
 }
 
-/** shortest_path — a cross-layer BFS path between two nodes (component→…→table). */
-export async function shortestPath(session, { from, to, projectId, maxHops = 8 }) {
-  const hopsSafe = Math.max(1, Math.min(12, Math.floor(maxHops)));
-  const r = await session.run(
-    `MATCH path = (a:Node {nodeId: $from, projectId: $projectId})
-                  -[*BFS 1..${hopsSafe}]-
-                  (b:Node {nodeId: $to, projectId: $projectId})
-     RETURN [n IN nodes(path) | n.nodeId] AS ids,
-            [r IN relationships(path) | type(r)] AS types
-     LIMIT 1`,
-    { from, to, projectId },
-  );
-  if (r.records.length === 0) return { from, to, found: false, hops: 0, nodes: [], edges: [] };
-  const rec = r.records[0];
-  const ids = rec.get('ids') ?? [];
-  const types = rec.get('types') ?? [];
-  return { from, to, found: true, hops: types.length, nodes: ids, edges: types };
+/**
+ * dependency_subgraph — BFS OUT-edges from a root, depth ≤3, node cap 500.
+ * Returns the collected nodes + the traversed edges, and a `truncated` flag when
+ * the cap is hit. Directed (dependencies flow along out-edges).
+ */
+export async function dependencySubgraph(store, { root, projectId, depth = 3, cap = 500 }) {
+  const depthSafe = Math.max(1, Math.min(3, Math.floor(Number(depth) || 3)));
+  const capSafe = Math.max(1, Math.min(500, Math.floor(Number(cap) || 500)));
+  const visited = new Set([root]);
+  const nodeIds = [root];
+  const edges = [];
+  let frontier = [root];
+  let truncated = false;
+
+  for (let d = 0; d < depthSafe && frontier.length && !truncated; d++) {
+    const next = [];
+    for (const id of frontier) {
+      const out = await store.outEdges(projectId, id);
+      for (const e of out) {
+        edges.push({ from: e.from, to: e.to, type: e.type });
+        if (!visited.has(e.to)) {
+          if (nodeIds.length >= capSafe) {
+            truncated = true;
+            break;
+          }
+          visited.add(e.to);
+          nodeIds.push(e.to);
+          next.push(e.to);
+        }
+      }
+      if (truncated) break;
+    }
+    frontier = next;
+  }
+
+  const hydrated = await Promise.all(nodeIds.map((id) => store.getNode(projectId, id)));
+  const nodes = nodeIds.map((id, i) => shape(hydrated[i], id));
+  return {
+    root,
+    projectId,
+    depth: depthSafe,
+    cap: capSafe,
+    truncated,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    nodes,
+    edges,
+  };
+}
+
+/**
+ * god_nodes — top centrality nodes for a project (Epic 3 metric, read-only).
+ * The GraphStore interface (S0.2) does not expose the centrality-index GSI as a
+ * query method, so we rank client-side over `listNodes`; the ordering matches the
+ * GSI-3 descending contract. Zero/absent centrality is excluded.
+ */
+export async function godNodes(store, { projectId, limit = 15 }) {
+  const lim = clampInt(limit, 15);
+  const nodes = await store.listNodes(projectId);
+  return nodes
+    .filter((n) => typeof n.centrality === 'number' && n.centrality > 0)
+    .sort((a, b) => b.centrality - a.centrality || (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0))
+    .slice(0, lim)
+    .map((n) => ({ ...shape(n, n.nodeId), centrality: numOrNull(n.centrality) }));
+}
+
+/**
+ * orphans — degree-0 active nodes (the "no alone dots" invariant, read-only).
+ * A node is an orphan when it appears on neither end of any edge and is not
+ * pruned. Computed live from `listNodes` + `listEdges`.
+ */
+export async function orphans(store, { projectId, limit = 100 }) {
+  const lim = clampInt(limit, 100);
+  const [nodes, edges] = await Promise.all([
+    store.listNodes(projectId),
+    store.listEdges(projectId),
+  ]);
+  const referenced = new Set();
+  for (const e of edges) {
+    referenced.add(e.from);
+    referenced.add(e.to);
+  }
+  return nodes
+    .filter((n) => !referenced.has(n.nodeId) && (n.status ?? 'active') !== 'pruned')
+    .slice(0, lim)
+    .map((n) => shape(n, n.nodeId));
+}
+
+// ── path finding (bidirectional meet-in-the-middle BFS over undirected edges) ──
+
+/** Walk a parent map from `node` toward its root; returns nodes+edges root-inclusive. */
+function pathToRoot(prevMap, node) {
+  const nodes = [];
+  const edges = [];
+  let cur = node;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    nodes.push(cur);
+    const p = prevMap.get(cur);
+    if (!p) break;
+    edges.push(p.type);
+    cur = p.prev;
+  }
+  return { nodes, edges }; // nodes: [node … root]
+}
+
+function reconstructPath(meet, from, to, fPrev, tPrev) {
+  const f = pathToRoot(fPrev, meet); // [meet … from]
+  const fNodes = [...f.nodes].reverse(); // [from … meet]
+  const fEdges = [...f.edges].reverse();
+  const t = pathToRoot(tPrev, meet); // [meet … to]
+  const tNodes = t.nodes.slice(1); // drop meet → [… to]
+  const tEdges = t.edges; // meet → … → to
+  const nodes = [...fNodes, ...tNodes];
+  const edges = [...fEdges, ...tEdges];
+  return { from, to, found: true, hops: edges.length, nodes, edges };
+}
+
+async function findPath(store, { from, to, projectId, maxHops }) {
+  const cap = Math.max(1, Math.min(12, Math.floor(Number(maxHops) || 12)));
+  if (from === to) return { from, to, found: true, hops: 0, nodes: [from], edges: [] };
+
+  const fPrev = new Map([[from, null]]);
+  const tPrev = new Map([[to, null]]);
+  let fLayer = [from];
+  let tLayer = [to];
+  let expansions = 0;
+
+  while (fLayer.length && tLayer.length && expansions < cap) {
+    const expandF = fLayer.length <= tLayer.length;
+    const layer = expandF ? fLayer : tLayer;
+    const selfPrev = expandF ? fPrev : tPrev;
+    const otherPrev = expandF ? tPrev : fPrev;
+    const next = [];
+    let meet = null;
+
+    for (const id of layer) {
+      const adj = await undirectedAdj(store, projectId, id);
+      for (const { id: nid, type } of adj) {
+        if (!selfPrev.has(nid)) {
+          selfPrev.set(nid, { prev: id, type });
+          next.push(nid);
+        }
+        if (otherPrev.has(nid)) {
+          meet = nid;
+          break;
+        }
+      }
+      if (meet) break;
+    }
+
+    if (meet) {
+      const built = reconstructPath(meet, from, to, fPrev, tPrev);
+      return built.hops <= cap ? built : { from, to, found: false, hops: 0, nodes: [], edges: [] };
+    }
+    if (expandF) fLayer = next;
+    else tLayer = next;
+    expansions++;
+  }
+  return { from, to, found: false, hops: 0, nodes: [], edges: [] };
+}
+
+/** shortest_path — a cross-layer path between two nodes (component→…→table). */
+export async function shortestPath(store, { from, to, projectId, maxHops = 8 }) {
+  return findPath(store, { from, to, projectId, maxHops });
+}
+
+/** path_between — bidirectional meet-in-the-middle path, up to 12 hops. */
+export async function pathBetween(store, { from, to, projectId, maxHops = 12 }) {
+  return findPath(store, { from, to, projectId, maxHops });
 }
 
 // ── Tool registry + dispatch (transport-agnostic) ───────────────────────────
@@ -230,16 +429,69 @@ export const TOOL_DEFS = [
     },
   },
   {
-    name: 'blast_radius',
+    name: 'transitive_reach',
     description:
-      'Everything a set of changed files touches in ≤2 hops across code+infra+services (incl. event/cron chains), grouped by kind. Call BEFORE editing.',
+      'Everything a set of changed files touches in ≤N hops across code+infra+services (incl. event/cron chains), grouped by kind. Call BEFORE editing. (Formerly blast_radius.)',
     inputSchema: {
       type: 'object',
       properties: {
         files: { type: 'array', items: { type: 'string' } },
         projectId: { type: 'string' },
+        hops: { type: 'number', description: 'Hop radius (1–4, default 2)' },
       },
       required: ['files', 'projectId'],
+    },
+  },
+  {
+    name: 'get_file_symbols',
+    description: 'List the graph nodes (functions/classes/symbols) declared in a source file.',
+    inputSchema: {
+      type: 'object',
+      properties: { file: { type: 'string' }, projectId: { type: 'string' } },
+      required: ['file', 'projectId'],
+    },
+  },
+  {
+    name: 'list_kind',
+    description: 'List all nodes of a given kind (e.g. table, endpoint, externalService, file).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string' },
+        projectId: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['kind', 'projectId'],
+    },
+  },
+  {
+    name: 'dependency_subgraph',
+    description:
+      'Directed out-edge subgraph rooted at a node (depth ≤3, capped at 500 nodes). Use to see what a node depends on, transitively.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        root: { type: 'string' },
+        projectId: { type: 'string' },
+        depth: { type: 'number', description: 'BFS depth (1–3, default 3)' },
+        cap: { type: 'number', description: 'Max nodes (≤500)' },
+      },
+      required: ['root', 'projectId'],
+    },
+  },
+  {
+    name: 'path_between',
+    description:
+      'A path between two nodes via bidirectional meet-in-the-middle search (≤12 hops).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string' },
+        to: { type: 'string' },
+        projectId: { type: 'string' },
+        maxHops: { type: 'number' },
+      },
+      required: ['from', 'to', 'projectId'],
     },
   },
   {
@@ -276,26 +528,36 @@ export const TOOL_DEFS = [
 ];
 
 /**
- * Route a tool call to its implementation. `ctx` carries the live `session`
- * (Bolt) and, for query_graph, an optional injectable `cascade` + `workingDir`.
- * Returns the raw structured result (telemetry wrapping is the caller's job).
+ * Route a tool call to its implementation. `ctx` carries the live `store`
+ * (GraphStore) and, for query_graph, an optional injectable `cascade` +
+ * `workingDir`. Returns the raw structured result (telemetry wrapping is the
+ * caller's job). `blast_radius` is kept as an alias for `transitive_reach`.
  */
 export async function dispatchTool(name, args = {}, ctx = {}) {
   switch (name) {
     case 'query_graph':
       return queryGraph(args, ctx);
     case 'get_node':
-      return getNode(ctx.session, args);
+      return getNode(ctx.store, args);
     case 'neighbors':
-      return neighbors(ctx.session, args);
-    case 'blast_radius':
-      return blastRadius(ctx.session, args);
+      return neighbors(ctx.store, args);
+    case 'transitive_reach':
+    case 'blast_radius': // alias (renamed)
+      return transitiveReach(ctx.store, args);
+    case 'get_file_symbols':
+      return getFileSymbols(ctx.store, args);
+    case 'list_kind':
+      return listKind(ctx.store, args);
+    case 'dependency_subgraph':
+      return dependencySubgraph(ctx.store, args);
+    case 'path_between':
+      return pathBetween(ctx.store, args);
     case 'god_nodes':
-      return godNodes(ctx.session, args);
+      return godNodes(ctx.store, args);
     case 'orphans':
-      return orphans(ctx.session, args);
+      return orphans(ctx.store, args);
     case 'shortest_path':
-      return shortestPath(ctx.session, args);
+      return shortestPath(ctx.store, args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -332,25 +594,6 @@ export async function dispatchWithTelemetry(name, args = {}, ctx = {}) {
   }
 }
 
-// ── neo4j scalar coercion (shared with graph-analytics) ─────────────────────
-
-function numOrNull(v) {
-  if (v == null) return null;
-  const n = typeof v === 'number' ? v : typeof v === 'object' && v.toNumber ? v.toNumber() : Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-function intOrNull(v) {
-  if (v == null) return null;
-  if (typeof v === 'object' && 'low' in v) return v.low;
-  if (typeof v === 'object' && v.toNumber) return v.toNumber();
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
-}
-/** neo4j-driver wants integers via neo4j.int(); pass-through when unavailable in tests. */
-function intParam(v) {
-  return Math.max(1, Math.floor(Number(v) || 1));
-}
-
 // ── stdio MCP transport bootstrap (server-only; dynamic SDK import) ──────────
 
 const isMain =
@@ -365,7 +608,10 @@ export async function startServer() {
     '@modelcontextprotocol/sdk/types.js'
   );
 
-  const driver = createDriver();
+  // One GraphStore for the process lifetime. Resolves to the DynamoDB store when
+  // GRAPH_NODES_TABLE/GRAPH_EDGES_TABLE are set (fleet host / Lambda with IAM),
+  // otherwise the in-memory store — no bolt, so this boots on ANY host.
+  const store = await createGraphStore();
   const server = new Server(
     { name: 'mycelium-mcp', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -375,17 +621,14 @@ export async function startServer() {
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args = {} } = req.params;
-    const session = driver.session();
     try {
-      const result = await dispatchWithTelemetry(name, args, { session });
+      const result = await dispatchWithTelemetry(name, args, { store });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return {
         isError: true,
         content: [{ type: 'text', text: `mycelium-mcp ${name} failed: ${err.message}` }],
       };
-    } finally {
-      await session.close();
     }
   });
 

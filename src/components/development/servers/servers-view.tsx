@@ -2,6 +2,7 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { FleetTab } from './fleet-tab';
 import { PolicyTab } from './policy-tab';
+import { MonitoringTab } from './monitoring-tab';
 
 export function ServersView() {
   return (
@@ -20,12 +21,16 @@ export function ServersView() {
         <TabsList>
           <TabsTrigger value="fleet">Fleet</TabsTrigger>
           <TabsTrigger value="dispatch-policy">Dispatch Policy</TabsTrigger>
+          <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
         </TabsList>
         <TabsContent value="fleet" className="mt-4">
           <FleetTab />
         </TabsContent>
         <TabsContent value="dispatch-policy" className="mt-4">
           <PolicyTab />
+        </TabsContent>
+        <TabsContent value="monitoring" className="mt-4">
+          <MonitoringTab />
         </TabsContent>
       </Tabs>
     </div>

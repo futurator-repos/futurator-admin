@@ -14,8 +14,22 @@
  *     `method`+`path`, event name. Uses props already captured in Epic 1.
  *
  * Pure + deterministic (no crypto, no clock) so it unit-tests directly; the
- * graph-sync `--global` path feeds it contract rows read from Memgraph and
- * writes the resulting contract nodes + CONSUMES_CONTRACT edges back.
+ * graph-sync `--global` path feeds it contract rows read from the GraphStore
+ * (S1.4 — session→store swap; Memgraph/bolt EXCISED, see `lib/graph-store.mjs`)
+ * and writes the resulting contract nodes + CONSUMES_CONTRACT edges back.
+ *
+ * The GraphStore is project-partitioned BY DESIGN (S0.2 — no query ever
+ * crosses projects), but federation is inherently a CROSS-project read. There
+ * is no store primitive to enumerate "every project" today, so `readContracts`
+ * takes an explicit `projectIds` list from the caller instead of scanning
+ * everything; a project-registry-backed enumeration is a follow-on capability,
+ * not solved here. All federation artifacts (shared `contract` nodes, `service`
+ * nodes, `CONSUMES_CONTRACT` edges) are written into one synthetic `_global`
+ * store partition — mirroring the old code's own choice of `projectId:'_global'`
+ * for contract nodes, and sidestepping the fact that a GraphStore edge's two
+ * endpoints must share one partition (a service in project A can't otherwise
+ * link to a contract that lives in project B's partition). Each service node's
+ * real project id is still recoverable from its nodeId (`service/<projectId>`).
  */
 
 /** Contract kinds that participate in the shared spine. */
@@ -137,65 +151,78 @@ export function federateContracts(projects, opts = {}) {
   return { strategy, contractNodes, consumes, unjoinable };
 }
 
-// ── Session-taking ingest (graph-sync --global path) ────────────────────────
+// ── Store-taking ingest (graph-sync --global path, S1.4) ────────────────────
 
 /**
- * Read every contract-bearing node across ALL project subgraphs in the
- * federated graph, grouped into the `projects` shape `federateContracts` wants.
+ * Read every contract-bearing node across the given projects, grouped into the
+ * `projects` shape `federateContracts` wants. `projectIds` must be supplied by
+ * the caller (see the module doc — the store has no cross-project scan).
+ *
+ * NOTE: `arn` is not on the `SYSTEM_GRAPH_NODE_PROPS` allowlist today, so it
+ * never round-trips through `store.putNodes`/`queryByKind` — `resource-identity`
+ * strategy joins will degrade to "unjoinable" until that allowlist is extended
+ * (out of S1.4's file scope; graph-store.mjs / system-graph-ingest.mjs own it).
+ * `schema-shape` (fields/primaryIndex/method/path — all allowlisted) is
+ * unaffected.
  */
-export async function readContracts(session) {
-  const r = await session.run(
-    `MATCH (n:Node) WHERE n.kind IN $kinds
-     RETURN n.projectId AS projectId, n.nodeId AS nodeId, n.kind AS kind,
-            n.arn AS arn, n.fields AS fields, n.primaryIndex AS primaryIndex,
-            n.method AS method, n.path AS path,
-            coalesce(n.title, n.label, n.nodeId) AS label`,
-    { kinds: CONTRACT_KINDS },
-  );
+export async function readContracts(store, projectIds) {
   const byProject = new Map();
-  for (const rec of r.records) {
-    const pid = rec.get('projectId');
-    if (!pid) continue;
-    if (!byProject.has(pid)) byProject.set(pid, { projectId: pid, contracts: [] });
-    byProject.get(pid).contracts.push({
-      nodeId: rec.get('nodeId'),
-      kind: rec.get('kind'),
-      arn: rec.get('arn') ?? null,
-      fields: rec.get('fields') ?? null,
-      primaryIndex: rec.get('primaryIndex') ?? null,
-      method: rec.get('method') ?? null,
-      path: rec.get('path') ?? null,
-      label: rec.get('label'),
-    });
+  for (const projectId of projectIds ?? []) {
+    // `queryByKind` takes ONE kind; loop the contract kinds instead of a
+    // single `kind IN [...]` scan (the store has no such primitive).
+    const contracts = [];
+    for (const kind of CONTRACT_KINDS) {
+      const kindNodes = await store.queryByKind(projectId, kind);
+      for (const n of kindNodes) {
+        contracts.push({
+          nodeId: n.nodeId,
+          kind: n.kind,
+          arn: n.props?.arn ?? null,
+          fields: n.props?.fields ?? null,
+          primaryIndex: n.props?.primaryIndex ?? null,
+          method: n.props?.method ?? null,
+          path: n.props?.path ?? null,
+          label: n.title ?? n.label ?? n.nodeId,
+        });
+      }
+    }
+    if (contracts.length) byProject.set(projectId, { projectId, contracts });
   }
   return [...byProject.values()];
 }
 
 /**
  * Write the federation result back to the graph: a shared `contract` node per
- * group (projectId `_global`, DERIVED provenance) and a `CONSUMES_CONTRACT`
- * edge from each consuming `service` node. Additive MERGEs — never deletes.
+ * group and a `CONSUMES_CONTRACT` edge from each consuming `service` node, all
+ * in the synthetic `_global` partition (see module doc). Additive upserts —
+ * never deletes; a `service` node's fields are set only ON CREATE (mirrors the
+ * old `ON CREATE SET`), so a later run never clobbers it.
  */
-export async function writeFederation(session, result) {
-  for (const c of result.contractNodes) {
-    await session.run(
-      `MERGE (n:Node {nodeId: $nodeId})
-       SET n.kind = $kind, n.title = $label, n.projectId = '_global',
-           n.provenance = 'DERIVED', n.consumerCount = $consumerCount, n.status = 'active'`,
-      { nodeId: c.nodeId, kind: c.kind, label: c.label, consumerCount: c.consumerCount },
-    );
+export async function writeFederation(store, result) {
+  const contractNodes = (result.contractNodes ?? []).map((c) => ({
+    nodeId: c.nodeId,
+    kind: c.kind,
+    title: c.label,
+    label: c.label,
+    status: 'active',
+  }));
+  if (contractNodes.length) await store.putNodes('_global', contractNodes);
+
+  let consumes = 0;
+  for (const e of result.consumes ?? []) {
+    const existingService = await store.getNode('_global', e.service);
+    if (!existingService) {
+      await store.putNodes('_global', [
+        { nodeId: e.service, kind: 'service', title: e.projectId, label: e.projectId, status: 'active' },
+      ]);
+    }
+    // MATCH-only on the contract node (both endpoints must exist).
+    const contractNode = await store.getNode('_global', e.contract);
+    if (!contractNode) continue;
+    await store.putEdges('_global', [
+      { type: 'CONSUMES_CONTRACT', from: e.service, to: e.contract, props: { via: e.via } },
+    ]);
+    consumes++;
   }
-  for (const e of result.consumes) {
-    await session.run(
-      `MERGE (s:Node {nodeId: $service})
-         ON CREATE SET s.kind = 'service', s.projectId = $projectId,
-                       s.title = $projectId, s.status = 'active'
-       WITH s
-       MATCH (c:Node {nodeId: $contract})
-       MERGE (s)-[rel:CONSUMES_CONTRACT]->(c)
-       SET rel.via = $via`,
-      { service: e.service, projectId: e.projectId, contract: e.contract, via: e.via },
-    );
-  }
-  return { contractNodes: result.contractNodes.length, consumes: result.consumes.length };
+  return { contractNodes: contractNodes.length, consumes };
 }

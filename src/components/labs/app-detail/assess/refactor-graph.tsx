@@ -25,7 +25,7 @@ import type { AuditHotspot } from '@/types/refactor-audit';
 import { useScanReport, type ScanDimension, type ScanFinding } from '@/hooks/use-scan-engine';
 import { buildHotspotGraph } from './hotspot-graph';
 
-const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+const S3_BASE = 'https://futurator-knowledge-live-eu.s3.eu-central-1.amazonaws.com/knowledge-live';
 
 // ── Finding-lenses (C-LENS): highlight nodes by assessment concern. ──
 // A lens either maps to a finding dimension (severity-weighted score) or to a

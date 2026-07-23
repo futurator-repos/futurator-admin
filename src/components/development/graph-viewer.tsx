@@ -22,7 +22,7 @@ import { GraphCanvas, type CanvasNode, type CanvasLink } from './graph-canvas';
 import { communityColor, type LayoutMode } from '@/lib/graph/catalog';
 import { buildAdjacency } from '@/lib/graph/analysis';
 
-const S3_BASE = 'https://futurator-ai-website.s3.us-east-1.amazonaws.com/knowledge-live';
+const S3_BASE = 'https://futurator-knowledge-live-eu.s3.eu-central-1.amazonaws.com/knowledge-live';
 // Article links open in a browser tab — use the CloudFront domain, NOT the raw
 // `futurator-ai-website.s3…` hostname (Chrome's safe-browsing flags it as a
 // "did you mean futurator.ai?" lookalike). Same content, no warning. Snapshot

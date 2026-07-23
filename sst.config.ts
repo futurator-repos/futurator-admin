@@ -154,6 +154,17 @@ export default $config({
     const FUTURATOR_PUBLIC_BUCKET = 'futurator-ai-website';
     const FUTURATOR_CF_DISTRIBUTION_ID = 'E1BI1YWMTLSDTE';
     const AWS_ACCOUNT_ID = '421515025850';
+    // ──────────────────────────────────────────────────────────────
+    // EU-migration KD-3 (bucket const SPLIT, not wholesale flip).
+    // The old `futurator-ai-website` bucket lives in the DEAD account; the
+    // migrated knowledge-live / timing / party-docs / git-graph reads AND the
+    // media-upload write path all move to this EU bucket (in 421515025850).
+    // The homepage `data/projects.json` publish + CF `E1BI1YWMTLSDTE` stay on
+    // FUTURATOR_PUBLIC_BUCKET (homepage is a separate project). The `apps/<name>/`
+    // prefix stays on the old const pending an operator decision (published user
+    // apps may still live on the old public bucket — historical incident risk).
+    // ──────────────────────────────────────────────────────────────
+    const FUTURATOR_KNOWLEDGE_BUCKET = 'futurator-knowledge-live-eu';
 
     // ── DynamoDB Tables ──
     const projectsTable = new sst.aws.Dynamo('ProjectsTable', {
@@ -1026,6 +1037,89 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
+    // EU-migration KD-1 — DynamoDB source-of-truth graph store (excises
+    // Memgraph, which only ran in Docker on the dead singleton EC2).
+    //
+    // Two tables, adjacency-list + reverse GSI, that any fleet host OR Lambda
+    // can traverse (bolt never could). An S3 snapshot projection keeps
+    // `graph-snapshot.json` / `_refactor/graph.json` byte-compatible so the read
+    // path (dev/Assess Graph tabs) needs ZERO UI change.
+    //
+    // NODE table (`futurator-graph-nodes`): PK projectId / SK nodeId. The three
+    // GSIs are PROJECT-SCOPED (mirroring the edge `|`-delimited key derivation)
+    // so no query ever crosses projects:
+    //   • kind-index      — hashKey kindKey (=`${projectId}|${kind}`), rangeKey
+    //                       nodeId → per-project queryByKind / list_kind.
+    //   • file-index      — hashKey fileKey (=`${projectId}|${file}`), rangeKey
+    //                       nodeId → per-project queryByFile / get_file_symbols.
+    //   • centrality-index— hashKey projectId, rangeKey centrality (number) →
+    //                       per-project descending rank for god_nodes (and the
+    //                       degree=0 filter powers orphans).
+    // The write path (S0.2 `graph-store-dynamo.mjs`) sets kindKey/fileKey on every
+    // node put; S1.4 back-fills centrality/degree (defaulted 0 until then).
+    //
+    // EDGE table (`futurator-graph-edges`): PK src / SK sk, with a reverse-index
+    // GSI (dst/rsk, projection ALL) for in-edge traversal and a project-index GSI
+    // (projectId/sk) for the snapshot projection's full-partition scan.
+    //
+    // PAY_PER_REQUEST + PITR + born-tagged. Deliberately NOT `link:`ed on any
+    // Lambda — the API role reads them via the `futurator-*` wildcard managed
+    // policy (apiRestorePolicy) to stay off AWS's 10,240-byte inline ceiling
+    // (see the Queues-module outage note on the API Lambda `link` array below).
+    // ──────────────────────────────────────────────────────────────
+    const graphNodesTable = new sst.aws.Dynamo('GraphNodesTable', {
+      fields: {
+        projectId: 'string',
+        nodeId: 'string',
+        kindKey: 'string',
+        fileKey: 'string',
+        centrality: 'number',
+      },
+      primaryIndex: { hashKey: 'projectId', rangeKey: 'nodeId' },
+      globalIndexes: {
+        // project-scoped: kindKey = `${projectId}|${kind}`
+        'kind-index': { hashKey: 'kindKey', rangeKey: 'nodeId' },
+        // project-scoped: fileKey = `${projectId}|${file}`
+        'file-index': { hashKey: 'fileKey', rangeKey: 'nodeId' },
+        // per-project descending centrality rank (god_nodes) + degree=0 orphans
+        'centrality-index': { hashKey: 'projectId', rangeKey: 'centrality' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-graph-nodes',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    const graphEdgesTable = new sst.aws.Dynamo('GraphEdgesTable', {
+      fields: {
+        src: 'string',
+        sk: 'string',
+        dst: 'string',
+        rsk: 'string',
+        projectId: 'string',
+      },
+      primaryIndex: { hashKey: 'src', rangeKey: 'sk' },
+      globalIndexes: {
+        // reverse adjacency for in-edge traversal (projection ALL is the default)
+        'reverse-index': { hashKey: 'dst', rangeKey: 'rsk' },
+        // full-partition scan per project for the snapshot projection
+        'project-index': { hashKey: 'projectId', rangeKey: 'sk' },
+      },
+      transform: {
+        table: {
+          name: 'futurator-graph-edges',
+          billingMode: 'PAY_PER_REQUEST',
+          pointInTimeRecovery: { enabled: true },
+          tags: { 'futurator:project': 'admin-hub', 'futurator:managed-by': 'sst' },
+        },
+      },
+    });
+
+    // ──────────────────────────────────────────────────────────────
     // Story 18.1 — FreeAgentSessionRole (Epic 18: Free Claude Code Agent)
     //
     // A standalone IAM role assumed per-session by the free-agent chat
@@ -1092,14 +1186,15 @@ export default $config({
               Effect: 'Allow',
               Action: ['s3:GetObject'],
               Resource: [
-                `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/knowledge-live/\${aws:PrincipalTag/project}/*`,
+                // EU-migration KD-3: knowledge-live now lives in the EU bucket.
+                `arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/knowledge-live/\${aws:PrincipalTag/project}/*`,
               ],
             },
             {
               Sid: 'ListProjectKnowledgeLive',
               Effect: 'Allow',
               Action: ['s3:ListBucket'],
-              Resource: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
+              Resource: [`arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}`],
               Condition: {
                 StringLike: {
                   's3:prefix': ['knowledge-live/${aws:PrincipalTag/project}/*'],
@@ -1245,6 +1340,9 @@ export default $config({
                 'dynamodb:Query',
                 'dynamodb:Scan',
                 'dynamodb:BatchWriteItem',
+                // EU-migration KD-1: Mycelium MCP node hydration batches GetItem
+                // across the graph-nodes table; BatchGetItem was missing.
+                'dynamodb:BatchGetItem',
               ],
               Resource: [
                 `arn:aws:dynamodb:eu-central-1:${acctId}:table/futurator-*`,
@@ -1275,6 +1373,36 @@ export default $config({
                 `arn:aws:ssm:eu-central-1:${acctId}:parameter/sst/futurator-admin/production/Secret/GithubPat/value`,
                 `arn:aws:ssm:eu-central-1:${acctId}:parameter/sst/Futurator-Admin/production/Secret/GithubPat/value`,
                 `arn:aws:ssm:eu-central-1:${acctId}:parameter/futurator/_pipeline/github-pat`,
+              ],
+            },
+            // EU-migration dossier F1 — the fleet daemon is the writer of the
+            // graph-snapshot / knowledge-live projection (s3-backup + optional
+            // direct PutObject) and reads knowledge-live back on any host. The
+            // per-server IAM user had no S3 write to the EU knowledge bucket.
+            {
+              Sid: 'KnowledgeLiveS3Write',
+              Effect: 'Allow',
+              Action: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
+              Resource: [`arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/knowledge-live/*`],
+            },
+            {
+              Sid: 'KnowledgeLiveS3List',
+              Effect: 'Allow',
+              Action: ['s3:ListBucket'],
+              Resource: [`arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}`],
+            },
+            // EU-migration C-1 — brownfield clones need the GitHub PAT from
+            // Secrets Manager (fleet IAM had ZERO secretsmanager grant, so a
+            // real PAT value alone could not fix brownfield materialization).
+            // Scoped to the legacy shared secret + per-project brownfield PATs
+            // in eu-central-1.
+            {
+              Sid: 'BrownfieldPatSecrets',
+              Effect: 'Allow',
+              Action: ['secretsmanager:GetSecretValue'],
+              Resource: [
+                `arn:aws:secretsmanager:eu-central-1:${acctId}:secret:futurator/labs-brownfield-github-pat-*`,
+                `arn:aws:secretsmanager:eu-central-1:${acctId}:secret:futurator/brownfield-pat/*`,
               ],
             },
           ],
@@ -1354,6 +1482,11 @@ export default $config({
         AGENT_EVENTS_TABLE: agentEventsTable.name,
         EPIC_WORKFLOWS_TABLE: epicWorkflowsTable.name,
         PLAN_SPEC_GRAPH_TABLE: planSpecGraphTable.name,
+        // EU-migration KD-1 — DynamoDB graph store (replaces Memgraph). Names
+        // reach the Lambda via env only; DynamoDB access rides the `futurator-*`
+        // wildcard managed policy (apiRestorePolicy), never `link:`.
+        GRAPH_NODES_TABLE: graphNodesTable.name,
+        GRAPH_EDGES_TABLE: graphEdgesTable.name,
         PROJECT_REGISTRY_TABLE: projectRegistryTable.name,
         PARTY_PROJECTS_TABLE: partyProjectsTable.name,
         PARTY_SESSIONS_TABLE: partySessionsTable.name,
@@ -1441,6 +1574,11 @@ export default $config({
         // Futurator.ai homepage publish pipeline (Stories 14-1, 14-2)
         FUTURATOR_PUBLIC_BUCKET,
         FUTURATOR_CF_DISTRIBUTION_ID,
+        // EU-migration KD-3 — the split knowledge/forensic/party-docs/media
+        // bucket (EU account). S0.3 repoints FORENSIC_S3_BUCKET / partyDocsBucket()
+        // / media-upload derivations off FUTURATOR_PUBLIC_BUCKET onto this env;
+        // the IAM grants below move in lockstep (else grant/read split-brain).
+        FUTURATOR_KNOWLEDGE_BUCKET,
         // PR-61 — build version stamp surfaced by /api/health
         BUILD_HASH,
         BUILD_TIME,
@@ -1452,16 +1590,21 @@ export default $config({
         {
           actions: ['s3:PutObject'],
           resources: [
+            // Homepage projects.json publish — stays on the old public bucket (KD-3).
             `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/data/*`,
-            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/media/*`,
+            // EU-migration KD-3: media upload moves to the EU knowledge bucket
+            // (must move with the S0.3 media-upload code repoint — else grant/read
+            // disagree). Homepage media base-URL repoint is a deferred follow-up.
+            `arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/media/*`,
           ],
         },
         // Party project docs (party-module §doc-upload): presigned PUT + list
-        // + delete under party-docs/<projectId>/. Daemon on EC2 pulls these
-        // via `aws s3 cp` using its instance role (separate perms below).
+        // + delete under party-docs/<projectId>/. The fleet daemon pulls these
+        // via `aws s3 cp` using its per-server IAM user (separate perms above).
+        // EU-migration KD-3: party-docs moved to the EU knowledge bucket.
         {
           actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
-          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/party-docs/*`],
+          resources: [`arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/party-docs/*`],
         },
         // PR-16 — Plan forensic snapshots. When a plan reaches terminal
         // status (delivered/archived) the forensic JSON is computed once and
@@ -1471,8 +1614,10 @@ export default $config({
         // call). Scoped to timing/* — does not collide with the public
         // homepage's other paths (data/, media/, apps/, knowledge-live/).
         {
+          // EU-migration KD-3: forensic/timing snapshots moved to the EU
+          // knowledge bucket (moves with the S0.3 FORENSIC_S3_BUCKET repoint).
           actions: ['s3:PutObject', 's3:GetObject'],
-          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/timing/*`],
+          resources: [`arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/timing/*`],
         },
         // 2026-05-19 — App-delete cascade. DELETE /api/apps/:appId cleans up
         // the App's deployed artifacts (`apps/<appId>/*`) and Mycelium
@@ -1483,8 +1628,12 @@ export default $config({
         {
           actions: ['s3:GetObject', 's3:DeleteObject'],
           resources: [
+            // apps/<appId>/ — STAYS on the old public bucket pending the operator
+            // decision on where published user apps live (KD-3 / historical
+            // index.html incident risk). S0.3 leaves the apps/ purge gated.
             `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/apps/*`,
-            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}/knowledge-live/*`,
+            // knowledge-live/<appId>/ Mycelium mirror — moved to EU bucket (KD-3).
+            `arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}/knowledge-live/*`,
           ],
         },
         // s3:ListBucket has no Resource ARN below the bucket level — it
@@ -1494,8 +1643,14 @@ export default $config({
         // keys is read-only; the actual destructive scope still rides
         // on the GetObject+DeleteObject grant above, which IS narrow.
         {
+          // EU-migration KD-3: listing now spans both buckets — apps/ + data/
+          // stay on the old public bucket, while knowledge-live/ / party-docs/ /
+          // timing/ / media/ moved to the EU knowledge bucket.
           actions: ['s3:ListBucket'],
-          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
+          resources: [
+            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`,
+            `arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}`,
+          ],
         },
         // 2026-07-07 — Pipeline-3 dev-env cleanup. DELETE /api/apps/:appId
         // also purges the dev preview bundle (dev.futurator.ai/<appId>/) and
@@ -1522,7 +1677,11 @@ export default $config({
         },
         {
           actions: ['s3:ListBucket'],
-          resources: [`arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`],
+          // EU-migration KD-3: both buckets (see split note above).
+          resources: [
+            `arn:aws:s3:::${FUTURATOR_PUBLIC_BUCKET}`,
+            `arn:aws:s3:::${FUTURATOR_KNOWLEDGE_BUCKET}`,
+          ],
           // No prefix condition — Lambda is trusted and we already scope by
           // prefix in the API handler.
         },
@@ -1845,51 +2004,16 @@ export default $config({
     });
 
     // ──────────────────────────────────────────────────────────────
-    // 2026-05-27 PR C.c — DeployerLambda (self-deploy daemon on main push)
+    // 2026-05-27 PR C.c — DeployerLambda — RETIRED (EU-migration KD-4).
     //
-    // Cron-polls every 60s; when origin/main advances past
-    // agent.deployer.last-deployed-sha (futurator-agent-flags), runs the
-    // snapshot → rsync → restart → 60s-health-check → auto-rollback flow.
-    // The lambda is itself danger-listed (PR C.b) so changes to it require
-    // operator typed-confirmation.
-    //
-    // Timeout 5 min covers worst case: 60s SSM dispatch lag + 60s rsync +
-    // 60s restart + 60s health-check + 60s rollback budget.
-    //
-    // SSM permission is broad — the cron Lambda needs to send shell
-    // commands to the daemon EC2 instance for snapshot/rsync/restart/
-    // health-check. Scoped to the same instance the API Lambda already
-    // controls (no expanded blast radius).
+    // The self-deploy cron fired SSM every 60s at the dead singleton EC2
+    // (`i-0826d68c316ae97dd`), which no longer exists. Fleet self-deploy is
+    // now a daemon-bundle pull (already shipped), so this Cron is removed
+    // rather than re-pointed. WaveCompletionCheck (above) stays ON under the
+    // same ENABLE_DAEMON_CRONS gate — KD-4 only splits out this resource.
+    // The `functions/cron/deployer-lambda.ts` handler retirement + the
+    // `deployer-orchestrator.ts` deprecation are owned by S0.4 (code side).
     // ──────────────────────────────────────────────────────────────
-    if (ENABLE_DAEMON_CRONS) {
-      new sst.aws.Cron('DeployerLambda', {
-        schedule: 'rate(1 minute)',
-        function: {
-          handler: 'functions/cron/deployer-lambda.handler',
-          runtime: 'nodejs22.x',
-          architecture: 'arm64',
-          memory: '256 MB',
-          timeout: '300 seconds',
-          link: [agentFlagsTable, agentEventsTable, attentionItemsTable],
-          environment: {
-            AGENT_FLAGS_TABLE: agentFlagsTable.name,
-            AGENT_EVENTS_TABLE: agentEventsTable.name,
-            ATTENTION_ITEMS_TABLE: attentionItemsTable.name,
-            EC2_INSTANCE_ID: process.env.EC2_INSTANCE_ID ?? 'i-0826d68c316ae97dd',
-          },
-          permissions: [
-            {
-              actions: [
-                'ssm:SendCommand',
-                'ssm:GetCommandInvocation',
-                'ssm:DescribeInstanceInformation',
-              ],
-              resources: ['*'],
-            },
-          ],
-        },
-      });
-    }
 
     // ── Cron: Timing Aggregator (Story 1.8.6 — Pipeline v2 Phase 1) ──
     // Every 6 hours. Scans delivered plans, groups by cohortKey, computes

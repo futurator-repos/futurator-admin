@@ -15,11 +15,18 @@ interface FilesResponse {
   entries: FileEntry[];
 }
 
-export function useEc2Files(path: string, enabled: boolean) {
+// `serverId` selects which fleet box's filesystem to browse (B4). Until a
+// server is selected there is nowhere to route the file-browse job, so the
+// query stays disabled regardless of the caller's own `enabled` flag — B6's
+// "no selection → zero file calls" AC.
+export function useEc2Files(serverId: string | null, path: string, enabled: boolean) {
   return useQuery({
-    queryKey: ['ec2-files', path],
-    queryFn: () => api.get<FilesResponse>(`/ec2/files?path=${encodeURIComponent(path)}`),
-    enabled,
+    queryKey: ['ec2-files', serverId, path],
+    queryFn: () =>
+      api.get<FilesResponse>(
+        `/ec2/files?serverId=${encodeURIComponent(serverId!)}&path=${encodeURIComponent(path)}`,
+      ),
+    enabled: enabled && !!serverId,
     staleTime: 30_000,
   });
 }
@@ -42,12 +49,14 @@ export type FileContentResponse =
       maxBytes: number;
     };
 
-export function useEc2FileContent(path: string | null) {
+export function useEc2FileContent(serverId: string | null, path: string | null) {
   return useQuery({
-    queryKey: ['ec2-file-content', path],
+    queryKey: ['ec2-file-content', serverId, path],
     queryFn: () =>
-      api.get<FileContentResponse>(`/ec2/files/content?path=${encodeURIComponent(path!)}`),
-    enabled: !!path,
+      api.get<FileContentResponse>(
+        `/ec2/files/content?serverId=${encodeURIComponent(serverId!)}&path=${encodeURIComponent(path!)}`,
+      ),
+    enabled: !!serverId && !!path,
     staleTime: 5 * 60_000,
     retry: false,
   });

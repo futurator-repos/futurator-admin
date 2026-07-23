@@ -19,6 +19,8 @@
     "bootstrap-verify": "node bootstrap-verify.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1024.0",
+    "@aws-sdk/lib-dynamodb": "^3.1024.0",
     "neo4j-driver": "^5.27.0"
   }
 }

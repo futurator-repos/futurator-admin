@@ -15,8 +15,9 @@
  * conservatively (re-brief rather than silently drop a change). The log doubles
  * as the audit trail for "why did this brief fire?".
  *
- * Pure builders + drift math unit-test directly; the session-taking append/read
- * are thin and exercised against a fake.
+ * Pure builders + drift math unit-test directly; the store-taking append/read
+ * (S1.4 — session→store swap; Memgraph/bolt EXCISED, see `lib/graph-store.mjs`)
+ * are thin and exercised against an in-memory GraphStore.
  *
  * Forbidden area (per Story 6.2): node `status` semantics — a revision is a NEW
  * node kind, never a status mutation of the contract node.
@@ -98,57 +99,72 @@ export function computeDriftCounts(revisions, lastPropagatedTo, commitOrder = []
   return out;
 }
 
-// ── Session-taking append / read (graph-sync wave-gate path) ─────────────────
+// ── Store-taking append / read (graph-sync wave-gate path, S1.4) ─────────────
+//
+// `rev.contractNode` / `change` / `atCommit` / `atWave` / `ts` are the
+// temporal payload — but `buildNodeItem` (graph-store.mjs) filters node
+// `props` to the `SYSTEM_GRAPH_NODE_PROPS` allowlist, and none of these keys
+// are on it (out of S1.4's file scope to extend). Edge `props`, by contrast,
+// are NOT allowlist-filtered (`buildEdgeItem`), so the payload lives on the
+// `REVISED` edge instead of the `rev` node — same information, a home the
+// store actually persists it in.
 
 /**
  * Append revision nodes + `(:Node {nodeId:contractNode})-[:REVISED]->(rev)`.
- * Additive MERGEs; never touches the contract node's `status` (forbidden area).
+ * Additive upserts; never touches the contract node's `status` (forbidden area).
  */
-export async function appendRevisions(session, revisions) {
+export async function appendRevisions(store, revisions) {
   for (const rev of revisions ?? []) {
-    await session.run(
-      `MERGE (rev:Node {nodeId: $nodeId})
-         SET rev.kind = 'contractRevision', rev.projectId = $projectId,
-             rev.contractNode = $contractNode, rev.change = $change,
-             rev.atCommit = $atCommit, rev.atWave = $atWave, rev.ts = $ts,
-             rev.status = 'active'
-       WITH rev
-       MATCH (c:Node {nodeId: $contractNode})
-       MERGE (c)-[:REVISED]->(rev)`,
+    const projectId = rev.projectId ?? '_global';
+    await store.putNodes(projectId, [
       {
         nodeId: rev.nodeId,
-        projectId: rev.projectId ?? '_global',
-        contractNode: rev.contractNode,
-        change: rev.change,
-        atCommit: rev.atCommit,
-        atWave: rev.atWave,
-        ts: rev.ts,
+        kind: 'contractRevision',
+        status: 'active',
+        title: rev.change,
+        updated: rev.ts,
       },
-    );
+    ]);
+
+    // MATCH-only on the contract node — mirrors the old Cypher (`MATCH`, not
+    // `MERGE`): a revision node is always recorded, but the REVISED edge only
+    // forms when the contract node it's about already exists.
+    const contractNode = await store.getNode(projectId, rev.contractNode);
+    if (!contractNode) continue;
+    await store.putEdges(projectId, [
+      {
+        type: 'REVISED',
+        from: rev.contractNode,
+        to: rev.nodeId,
+        props: {
+          contractNode: rev.contractNode,
+          change: rev.change,
+          atCommit: rev.atCommit,
+          atWave: rev.atWave,
+          ts: rev.ts,
+        },
+      },
+    ]);
   }
   return { revisions: (revisions ?? []).length };
 }
 
 /** Read every revision appended to a contract node (newest fields included). */
-export async function readRevisions(session, contractNode) {
-  const r = await session.run(
-    `MATCH (c:Node {nodeId: $contractNode})-[:REVISED]->(rev:Node {kind: 'contractRevision'})
-     RETURN rev.nodeId AS nodeId, rev.change AS change, rev.atCommit AS atCommit,
-            rev.atWave AS atWave, rev.ts AS ts
-     ORDER BY rev.ts`,
-    { contractNode },
-  );
-  return r.records.map((rec) => ({
-    nodeId: rec.get('nodeId'),
-    change: rec.get('change'),
-    atCommit: rec.get('atCommit'),
-    atWave: rec.get('atWave'),
-    ts: rec.get('ts'),
-  }));
+export async function readRevisions(store, projectId, contractNode) {
+  const edges = await store.outEdges(projectId, contractNode, { type: 'REVISED' });
+  return edges
+    .map((e) => ({
+      nodeId: e.to,
+      change: e.props?.change ?? null,
+      atCommit: e.props?.atCommit ?? null,
+      atWave: e.props?.atWave ?? null,
+      ts: e.props?.ts ?? null,
+    }))
+    .sort((a, b) => String(a.ts ?? '').localeCompare(String(b.ts ?? '')));
 }
 
 /** driftSince[sibling] for one contract: read revisions, then compute. */
-export async function driftSince(session, contractNode, lastPropagatedTo, commitOrder = []) {
-  const revisions = await readRevisions(session, contractNode);
+export async function driftSince(store, projectId, contractNode, lastPropagatedTo, commitOrder = []) {
+  const revisions = await readRevisions(store, projectId, contractNode);
   return computeDriftCounts(revisions, lastPropagatedTo, commitOrder);
 }

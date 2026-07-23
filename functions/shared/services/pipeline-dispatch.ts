@@ -16,6 +16,7 @@ import type { Plan } from '../types/plan';
 import type { StoryNodeRow, StoryNodeState } from '../types/plan-spec';
 import type { planStatusSchema } from '../schemas/plan-schema';
 import { dispatchPipelineSchema } from '../schemas/pipeline-dispatch-schema';
+import { resolveRepoRef } from '../github/parse-repo-url';
 import * as appRepo from '../repositories/app-repository';
 import * as planRepo from '../repositories/plan-repository';
 import * as agentJobsRepo from '../repositories/agent-jobs-repository';
@@ -81,6 +82,17 @@ export function deriveRunId(source: string, sealId: string, version?: string): s
     .update(`${source}:seal:${sealId}:${version ?? ''}`)
     .digest('hex');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+/**
+ * Public https URL of the app's dev repo. Brownfield apps carry an explicit
+ * `githubRepoUrl`; greenfield falls back to `futurator-repos/<appId>` (the repo
+ * the dispatch scaffold creates). Exposed so external callers (mycelium) can
+ * store the project→repo binding from the first run.
+ */
+export function repoHtmlUrl(appId: string, githubRepoUrl?: string | null): string {
+  const { owner, repo } = resolveRepoRef(appId, githubRepoUrl);
+  return `https://github.com/${owner}/${repo}`;
 }
 
 /** Throwaway per-call slug when the caller supplies no stable app.ref. */
@@ -569,10 +581,14 @@ export async function handleDispatch(c: Context): Promise<Response> {
 
   try {
     const { runId, appId, isNewApp, idempotent } = await dispatchPipelineRun(parsed.data);
+    // Repo binding for the caller — the app row exists by now on every path
+    // (greenfield creates it before returning; iteration/idempotent found it).
+    const app = await appRepo.getApp(appId);
     return c.json(
       {
         runId,
         appId,
+        repoUrl: repoHtmlUrl(appId, app?.githubRepoUrl),
         isNewApp,
         idempotent,
         statusUrl: `/api/pipeline/runs/${runId}`,
@@ -609,6 +625,13 @@ export async function handleGetRun(c: Context): Promise<Response> {
   // return an empty array (not a 404).
   const storyNodes = await storyNodeRepo.getPlanStoryNodes(planId);
   const view = derivePipelineStage(plan, storyNodes);
+  const app = plan.appId ? await appRepo.getApp(plan.appId) : null;
   // Echo dispatch provenance so the caller can correlate this run to its seal.
-  return c.json({ runId: planId, appId: plan.appId, provenance: plan.sealProvenance, ...view });
+  return c.json({
+    runId: planId,
+    appId: plan.appId,
+    ...(plan.appId ? { repoUrl: repoHtmlUrl(plan.appId, app?.githubRepoUrl) } : {}),
+    provenance: plan.sealProvenance,
+    ...view,
+  });
 }

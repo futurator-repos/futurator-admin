@@ -1,8 +1,9 @@
 /**
  * Pruning Scan & Node Archival — MY-3.4
  *
- * Queries Memgraph for superseded nodes with no active dependents, then
- * archives the wiki articles and removes nodes from the graph.
+ * Queries the graph store for superseded nodes with no active dependents, then
+ * archives the wiki articles and flips the nodes to `pruned` in the graph
+ * (reversible status flip — never a hard delete; bolt EXCISED, EU-migration S2.2).
  *
  * Modes:
  *   - Default: lists candidates for confirmation
@@ -20,7 +21,7 @@
  * [Source: docs/concepts/mycelium-labs-architecture.md#6.1-Node-Status-Lifecycle]
  */
 
-import { createDriver } from './lib/memgraph-driver.mjs';
+import { createGraphStore } from './lib/graph-store.mjs';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs';
 import { join, basename, dirname } from 'path';
 
@@ -104,18 +105,13 @@ function updateFrontmatter(filePath, updates) {
   return true;
 }
 
-// ── Memgraph Connection ──
+// ── Graph store ──
 
-const driver = createDriver();
+const store = await createGraphStore();
 
-async function runQuery(cypher, params = {}) {
-  const session = driver.session();
-  try {
-    const result = await session.run(cypher, params);
-    return result.records;
-  } finally {
-    await session.close();
-  }
+/** Read a node field, falling back to the allowlisted `props` bag. */
+function nodeField(node, key) {
+  return node?.[key] ?? node?.props?.[key];
 }
 
 // ── Step 1: Find Pruning Candidates ──
@@ -125,38 +121,32 @@ async function findPruningCandidates() {
   console.log(`  Project: ${projectId}`);
   console.log('');
 
-  // Pruning candidates query from architecture doc section 5.2
-  const records = await runQuery(`
-    MATCH (n:Node)
-    WHERE n.status = 'superseded'
-      AND n.projectId = $projectId
-      AND NOT (n)<-[:DEPENDS_ON]-(:Node {status: 'active'})
-    RETURN n.nodeId AS nodeId, n.title AS title, n.type AS type,
-           n.updated AS lastUpdated, n.phase AS phase
-    ORDER BY n.updated ASC
-  `, { projectId });
+  // Superseded nodes with no active DEPENDS_ON dependent (reverse in-edge scan).
+  const nodes = await store.listNodes(projectId);
+  const superseded = nodes
+    .filter((n) => n.status === 'superseded')
+    .sort((a, b) => String(nodeField(a, 'updated') ?? '').localeCompare(String(nodeField(b, 'updated') ?? '')));
 
   const candidates = [];
-  for (const rec of records) {
-    const nodeId = toStr(rec.get('nodeId'));
+  for (const n of superseded) {
+    const dependents = await store.inEdges(projectId, n.nodeId, { type: 'DEPENDS_ON' });
+    let hasActiveDependent = false;
+    for (const e of dependents) {
+      const dep = await store.getNode(projectId, e.from);
+      if (dep && (dep.status ?? 'active') === 'active') { hasActiveDependent = true; break; }
+    }
+    if (hasActiveDependent) continue;
 
-    // Find what superseded this node
-    const supersederRecords = await runQuery(`
-      MATCH (newer:Node)-[:SUPERSEDES]->(n:Node {nodeId: $nodeId})
-      RETURN newer.nodeId AS supersederId
-      LIMIT 1
-    `, { nodeId });
-
-    const supersededBy = supersederRecords.length > 0
-      ? toStr(supersederRecords[0].get('supersederId'))
-      : 'unknown';
+    // Find what superseded this node: (newer)-[:SUPERSEDES]->(n) — an in-edge on n.
+    const supersedes = await store.inEdges(projectId, n.nodeId, { type: 'SUPERSEDES' });
+    const supersededBy = supersedes.length > 0 ? toStr(supersedes[0].from) : 'unknown';
 
     candidates.push({
-      nodeId,
-      title: toStr(rec.get('title')),
-      type: toStr(rec.get('type')),
-      phase: toStr(rec.get('phase')),
-      lastUpdated: toStr(rec.get('lastUpdated')),
+      nodeId: n.nodeId,
+      title: toStr(n.title ?? nodeField(n, 'title')),
+      type: toStr(nodeField(n, 'type') ?? n.kind),
+      phase: toStr(nodeField(n, 'phase')),
+      lastUpdated: toStr(nodeField(n, 'updated')),
       supersededBy,
     });
   }
@@ -167,16 +157,28 @@ async function findPruningCandidates() {
 // ── Step 2: Verification — Double-check no active dependents ──
 
 async function verifyNoDependents(nodeId) {
-  const records = await runQuery(`
-    MATCH (target:Node {nodeId: $nodeId})
-    MATCH path = (target)<-[:DEPENDS_ON|VALIDATES*1..5]-(affected)
-    WHERE affected.status = 'active'
-    RETURN affected.nodeId AS affectedId, affected.type AS type,
-           length(path) AS hops
-    ORDER BY hops ASC
-  `, { nodeId });
-
-  return records.length === 0;
+  // Reverse-BFS over DEPENDS_ON|VALIDATES in-edges (≤5 hops); any active node
+  // reached means the target is still depended on.
+  const DEP_EDGE_TYPES = ['DEPENDS_ON', 'VALIDATES'];
+  const visited = new Set([nodeId]);
+  let frontier = [nodeId];
+  for (let hops = 1; hops <= 5 && frontier.length; hops++) {
+    const next = [];
+    for (const id of frontier) {
+      for (const type of DEP_EDGE_TYPES) {
+        for (const e of await store.inEdges(projectId, id, { type })) {
+          const affectedId = e.from;
+          if (visited.has(affectedId)) continue;
+          visited.add(affectedId);
+          next.push(affectedId);
+          const affected = await store.getNode(projectId, affectedId);
+          if (affected && (affected.status ?? 'active') === 'active') return false;
+        }
+      }
+    }
+    frontier = next;
+  }
+  return true;
 }
 
 // ── Step 3: Archive Article ──
@@ -205,27 +207,25 @@ function archiveArticle(nodeId, supersededBy) {
   return true;
 }
 
-// ── Step 4: Remove from Memgraph ──
+// ── Step 4: Flip the node to `pruned` in the graph store ──
 
-async function deleteFromMemgraph(nodeId) {
-  // DETACH DELETE removes the node AND all its edges
-  await runQuery(`
-    MATCH (n:Node {nodeId: $nodeId})
-    DETACH DELETE n
-  `, { nodeId });
-
-  // Verify deletion
-  const check = await runQuery(`
-    MATCH (n:Node {nodeId: $nodeId})
-    RETURN n.nodeId
-  `, { nodeId });
-
-  if (check.length > 0) {
-    console.log(`  [ERROR] Node ${nodeId} still exists after DETACH DELETE`);
+async function markNodePruned(nodeId) {
+  // Reversible status flip (never a hard delete — the store keeps the row so a
+  // mis-prune is recoverable; S1.4 prune model). The archived article carries
+  // the same `status: pruned` frontmatter.
+  const ok = await store.setNodeAttrs(projectId, nodeId, { status: 'pruned' });
+  if (!ok) {
+    console.log(`  [WARN] Node ${nodeId} not found in the graph store (article archived anyway)`);
     return false;
   }
 
-  console.log(`  [DELETED] ${nodeId} removed from Memgraph`);
+  const check = await store.getNode(projectId, nodeId);
+  if (!check || check.status !== 'pruned') {
+    console.log(`  [ERROR] Node ${nodeId} status not 'pruned' after setNodeAttrs`);
+    return false;
+  }
+
+  console.log(`  [PRUNED] ${nodeId} flipped to status=pruned in the graph store`);
   return true;
 }
 
@@ -348,10 +348,10 @@ async function executePruning(candidates) {
     // Archive the article file
     const archived = archiveArticle(candidate.nodeId, candidate.supersededBy);
 
-    // Delete from Memgraph
-    const deleted = await deleteFromMemgraph(candidate.nodeId);
+    // Flip the node to `pruned` in the graph store
+    const marked = await markNodePruned(candidate.nodeId);
 
-    if (archived || deleted) {
+    if (archived || marked) {
       pruned.push(candidate);
     }
   }
@@ -441,7 +441,7 @@ async function main() {
     console.error(err.stack);
     process.exit(1);
   } finally {
-    await driver.close();
+    await store.close?.();
   }
 }
 

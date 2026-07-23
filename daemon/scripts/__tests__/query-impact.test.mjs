@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildReverseImpactCypher, STRUCTURAL_EDGE_TYPES, queryImpact } from '../lib/impact-propagation.mjs';
+import { createMemoryGraphStore } from '../lib/graph-store-memory.mjs';
 
 describe('buildReverseImpactCypher', () => {
   it('reverse-traverses only the deterministic structural edges', () => {
@@ -16,34 +17,43 @@ describe('buildReverseImpactCypher', () => {
   });
 });
 
-// Minimal neo4j-driver stand-in.
-function fakeDriver(rows) {
-  const rec = (o) => ({ get: (k) => o[k] });
-  return {
-    session: () => ({
-      run: async () => ({ records: rows.map(rec) }),
-      close: async () => {},
-    }),
-  };
-}
-
+// EU-migration S2.2: bolt/Memgraph EXCISED — queryImpact now reverse-BFSes the
+// GraphStore's `inEdges`, so the test drives the real in-memory store (the same
+// code path the DynamoDB impl exposes) instead of a fake neo4j session.
 describe('queryImpact (read-only)', () => {
-  it('returns impacted nodes deduped to shortest hop + surfaces covering tests', async () => {
-    const driver = fakeDriver([
-      { nodeId: 'code/login.ts', kind: 'file', label: 'login.ts', hops: 1 },
-      { nodeId: 'code/login.ts', kind: 'file', label: 'login.ts', hops: 3 }, // longer path — dropped
-      { nodeId: 'code/login.test.ts', kind: 'file', label: 'login.test.ts', hops: 1 },
+  const PID = 'p';
+
+  it('returns impacted nodes at their shortest hop + surfaces covering tests', async () => {
+    const store = createMemoryGraphStore();
+    await store.putNodes(PID, [
+      { nodeId: 'code/token.ts', kind: 'file', label: 'token.ts' },
+      { nodeId: 'code/login.ts', kind: 'file', label: 'login.ts' },
+      { nodeId: 'code/login.test.ts', kind: 'file', label: 'login.test.ts' },
     ]);
-    const r = await queryImpact('code/token.ts', driver);
+    // login.ts IMPORTS token.ts  → token.ts's reverse-reach at hop 1 is login.ts
+    // login.test.ts TESTS login.ts → the covering test at hop 2
+    await store.putEdges(PID, [
+      { from: 'code/login.ts', to: 'code/token.ts', type: 'IMPORTS' },
+      { from: 'code/login.test.ts', to: 'code/login.ts', type: 'TESTS' },
+    ]);
+
+    const r = await queryImpact('code/token.ts', store, { projectId: PID });
     expect(r.sourceNodeId).toBe('code/token.ts');
     expect(r.impacted.find((n) => n.nodeId === 'code/login.ts').hops).toBe(1);
+    expect(r.impacted.find((n) => n.nodeId === 'code/login.test.ts').hops).toBe(2);
     expect(r.impacted).toHaveLength(2);
     expect(r.tests).toEqual(['code/login.test.ts']); // the covering test, for selective regression
   });
 
   it('empty graph → empty impact (no throw)', async () => {
-    const r = await queryImpact('x', fakeDriver([]));
+    const store = createMemoryGraphStore();
+    const r = await queryImpact('x', store, { projectId: PID });
     expect(r.impacted).toEqual([]);
     expect(r.tests).toEqual([]);
+  });
+
+  it('requires a projectId (the store is project-partitioned)', async () => {
+    const store = createMemoryGraphStore();
+    await expect(queryImpact('x', store, {})).rejects.toThrow(/projectId/);
   });
 });

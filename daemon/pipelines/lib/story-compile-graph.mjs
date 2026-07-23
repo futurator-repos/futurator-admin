@@ -338,7 +338,7 @@ export async function runStoryCompileGraph({
     if (after) {
       log(`graph ${graphUpdated ? 'updated' : 'unchanged'}: ${after.nodeCount} nodes, ${after.edgeCount} edges`);
     } else {
-      log('graph snapshot not found after sync (Memgraph unavailable?) — non-blocking');
+      log('graph snapshot not found after sync (graph store write failed?) — non-blocking');
     }
 
     return { ran: true, graphUpdated, reason: after ? undefined : 'no-snapshot' };

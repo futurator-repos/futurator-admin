@@ -1,10 +1,11 @@
 /**
- * Graph Sync Script — Embed + Memgraph Upsert
- * Story MY-1.5 + MY-1.6 (S3 backup integration)
+ * Graph Sync Script — Embed + GraphStore Upsert
+ * Story MY-1.5 + MY-1.6 (S3 backup integration) · S1.1 (EU migration: GraphStore)
  *
  * Reads wiki articles from knowledge/ dir, parses frontmatter,
  * diffs against compile-state.json hashes, embeds changed articles
- * via Voyage AI, upserts nodes into Memgraph, creates edges from
+ * via Voyage AI, upserts nodes/edges into the DynamoDB-backed GraphStore
+ * (bolt/Memgraph EXCISED — see lib/graph-store.mjs), creates edges from
  * [[wikilinks]], and backs up to S3.
  *
  * Usage:
@@ -13,9 +14,10 @@
  *   node graph-sync.mjs --project spyhunter --knowledge-dir /path/to/knowledge --skip-backup
  *
  * Environment:
- *   MEMGRAPH_URI       — Bolt URI (default: bolt://localhost:7687)
- *   MEMGRAPH_USER      — Optional; if set, basic auth is enabled
- *   MEMGRAPH_PASSWORD  — Paired with MEMGRAPH_USER
+ *   GRAPH_NODES_TABLE  — DynamoDB nodes table; when unset the store falls back
+ *                        to an in-memory impl (tests / hosts without graph env)
+ *   GRAPH_EDGES_TABLE  — DynamoDB edges table (paired with GRAPH_NODES_TABLE)
+ *   AWS_REGION         — DynamoDB region (default: eu-central-1)
  *   VOYAGE_API_KEY     — Required for embedding
  */
 
@@ -25,7 +27,16 @@ import { join, relative, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+// Legacy Memgraph driver — S1.4 converted the integrity / prune / analytics /
+// contract-revision / federation(5.1) passes onto the GraphStore below (their
+// lib functions now take a `store`, not a `session`). RETAINED as a narrow
+// seam for the two passes that still route through lib files OUTSIDE S1.4's
+// file scope: capability ingest/gaps (5.2/5.3, `lib/capability.mjs`) inside
+// processFederation, and the whole PROPAGATOR pass (`propagator.mjs`, a
+// DIFFERENT file from this story's `lib/impact-propagation.mjs`). A follow-on
+// story converts those two and this import goes away.
 import { createDriver } from './lib/memgraph-driver.mjs';
+import { createGraphStore } from './lib/graph-store.mjs';
 import { embedBatch, getUsageStats, resetUsageStats } from './lib/voyage-embed.mjs';
 import { backupToS3 } from './lib/s3-backup.mjs';
 import { loadAliasMap, resolveImportSource } from './lib/import-resolver.mjs';
@@ -55,7 +66,12 @@ import {
   writeCapabilities,
   findCapabilityGaps,
 } from './lib/capability.mjs';
-import { computeSimilarTo } from './lib/embedding-knn.mjs';
+import {
+  computeSimilarTo,
+  readEmbeddingsSidecar,
+  writeEmbeddingsSidecar,
+  mergeEmbeddings,
+} from './lib/embedding-knn.mjs';
 import { diffContracts, CONTRACT_NODE_KINDS } from './contract-diff.mjs';
 import { buildRevisions, appendRevisions } from './lib/contract-revision.mjs';
 import {
@@ -386,13 +402,19 @@ async function main() {
   const config = parseArgs();
   const startTime = Date.now();
 
+  // GraphStore: the DynamoDB-backed store when GRAPH_NODES_TABLE/GRAPH_EDGES_TABLE
+  // resolve, else an in-memory store. ONE instance is threaded through every
+  // write pass so the in-memory impl (per-instance state) observes a coherent
+  // graph across passes; the Dynamo impl shares the same tables regardless.
+  const store = await createGraphStore();
+
   // ── --doc-scan: run ONLY the Agentic Document Center pass ─────────────
   // The apply-artifact endpoint + the readiness gate enqueue a fast
   // `graph-sync --doc-scan` (Story 6.5 pattern) so approved specs reflect into
-  // the graph without a full article re-embed. Idempotent MERGE makes replay free.
+  // the graph without a full article re-embed. Idempotent upsert makes replay free.
   if (config.docScan) {
     log(`Document-center scan for project: ${config.project}`);
-    await processDocumentFacts(config);
+    await processDocumentFacts(config, store);
     return;
   }
 
@@ -446,16 +468,16 @@ async function main() {
 
   if (articlesToProcess.length === 0 && deletedNodeIds.length === 0) {
     log('Nothing to sync — all articles up to date');
-    await processAstFacts(config);
-    await processSystemGraphFacts(config);
-    await processTestCoverFacts(config); // W3.3 — dark unless P3_TEST_COVER_EDGES=on
-    await processDocumentFacts(config);
-    await processGraphIntegrity(config);
-    await writeGraphSnapshot(config);
+    await processAstFacts(config, store);
+    await processSystemGraphFacts(config, store);
+    await processTestCoverFacts(config, store); // W3.3 — dark unless P3_TEST_COVER_EDGES=on
+    await processDocumentFacts(config, store);
+    await processGraphIntegrity(config, store);
+    await writeGraphSnapshot(config, store);
     await writeGitGraphSnapshotLocal(config);
-    await processGraphAnalytics(config);
-    await processContractRevisions(config);
-    await processFederation(config);
+    await processGraphAnalytics(config, store);
+    await processContractRevisions(config, store);
+    await processFederation(config, store);
     await processPropagator(config);
     if (!config.skipBackup) {
       await runS3Backup(config);
@@ -506,155 +528,127 @@ async function main() {
     embeddings = parsedArticles.map(() => null);
   }
 
-  // ── Step 6: Upsert nodes into Memgraph ───────────────────────────
-  const driver = createDriver();
-
+  // ── S1.5: persist embedding vectors to the per-project sidecar ────
+  // Step 5 still computes Voyage vectors, but they are NOT stored on graph nodes
+  // (the store node shape carries no vector) nor in the browser-served
+  // `graph-snapshot.json`. They land in a PRIVATE per-project sidecar
+  // (`knowledge/_graph/embeddings.json`, `{nodeId: number[1024]}`) which rides the
+  // existing S3 backup to `knowledge-live/<projectId>/_graph/` — never shipped to
+  // the Graph tab. `graph-search.mjs` reads it for query-time KNN. Only re-embedded
+  // (NEW/CHANGED) articles are updated this run, so we MERGE onto the existing
+  // sidecar and drop deleted nodes — an overwrite would wipe every unchanged
+  // node's vector. Non-blocking: a sidecar failure never fails the sync.
+  const embeddedCount = embeddings.filter(Boolean).length;
   try {
-    const session = driver.session();
-    let upsertCount = 0;
-    let pruneCount = 0;
-    let edgeCreateCount = 0;
-    let edgeRemoveCount = 0;
-
-    try {
-      // Upsert changed/new nodes
-      for (let i = 0; i < parsedArticles.length; i++) {
-        const article = parsedArticles[i];
-        const embedding = embeddings[i];
-        const fm = article.frontmatter;
-
-        const params = {
-          nodeId: article.nodeId,
-          projectId: config.project,
-          type: fm.type || 'unknown',
-          phase: fm.phase || 'unknown',
-          status: fm.status || 'active',
-          maturity: typeof fm.maturity === 'number' ? fm.maturity : 0.1,
-          title: fm.title || article.nodeId,
-          summary: article.summary,
-          tags: Array.isArray(fm.tags) ? fm.tags : [],
-          createdByEpic: fm.createdByEpic || '',
-          createdByStory: fm.createdByStory || '',
-          lastMutatedByStory: fm.lastMutatedByStory || '',
-          created: fm.created || new Date().toISOString().split('T')[0],
-          updated: fm.updated || new Date().toISOString().split('T')[0],
-        };
-
-        // Build SET clause dynamically based on whether we have an embedding
-        let setClause = `
-          SET n.projectId = $projectId, n.type = $type, n.phase = $phase,
-              n.status = $status, n.maturity = $maturity, n.title = $title,
-              n.summary = $summary, n.tags = $tags,
-              n.createdByEpic = $createdByEpic, n.createdByStory = $createdByStory,
-              n.lastMutatedByStory = $lastMutatedByStory,
-              n.created = $created, n.updated = $updated`;
-
-        if (embedding) {
-          setClause += ', n.embedding = $embedding';
-          params.embedding = embedding;
-        }
-
-        await session.run(`MERGE (n:Node {nodeId: $nodeId}) ${setClause}`, params);
-        upsertCount++;
+    const updates = {};
+    for (let i = 0; i < parsedArticles.length; i++) {
+      const vec = embeddings[i];
+      if (Array.isArray(vec) && vec.length > 0) {
+        updates[parsedArticles[i].nodeId] = vec;
       }
-
-      log(`Upserted ${upsertCount} nodes`);
-
-      // Prune deleted articles (mark as pruned, don't delete)
-      for (const deletedId of deletedNodeIds) {
-        await session.run(
-          `MATCH (n:Node {nodeId: $nodeId}) SET n.status = 'pruned', n.updated = $today`,
-          { nodeId: deletedId, today: new Date().toISOString().split('T')[0] }
-        );
-        pruneCount++;
-      }
-
-      if (pruneCount > 0) {
-        log(`Pruned ${pruneCount} nodes`);
-      }
-
-      // ── Step 7: Create/update edges from wikilinks ───────────────
-      for (const article of parsedArticles) {
-        // First, remove existing outgoing edges from this node that we manage
-        // (to handle removed wikilinks)
-        const existingEdgesResult = await session.run(
-          `MATCH (a:Node {nodeId: $nodeId})-[r]->(b:Node)
-           WHERE a.projectId = $projectId
-           RETURN type(r) AS edgeType, b.nodeId AS targetId, id(r) AS edgeId`,
-          { nodeId: article.nodeId, projectId: config.project }
-        );
-
-        const existingEdges = new Set(
-          existingEdgesResult.records.map(
-            (r) => `${r.get('edgeType')}:${r.get('targetId')}`
-          )
-        );
-
-        const desiredEdges = new Set();
-
-        for (const link of article.wikilinks) {
-          if (link.direction === 'outgoing') {
-            // Current article -> target
-            desiredEdges.add(`${link.type}:${link.target}`);
-            await session.run(
-              `MATCH (a:Node {nodeId: $sourceId}), (b:Node {nodeId: $targetId})
-               MERGE (a)-[r:${link.type}]->(b)
-               SET r.weight = $weight`,
-              { sourceId: article.nodeId, targetId: link.target, weight: link.weight }
-            );
-            edgeCreateCount++;
-          } else if (link.direction === 'incoming') {
-            // Target -> current article (reverse edge)
-            await session.run(
-              `MATCH (a:Node {nodeId: $targetId}), (b:Node {nodeId: $sourceId})
-               MERGE (a)-[r:${link.type}]->(b)
-               SET r.weight = $weight`,
-              { sourceId: article.nodeId, targetId: link.target, weight: link.weight }
-            );
-            edgeCreateCount++;
-          } else if (link.direction === 'bidirectional') {
-            // Both directions
-            desiredEdges.add(`${link.type}:${link.target}`);
-            await session.run(
-              `MATCH (a:Node {nodeId: $sourceId}), (b:Node {nodeId: $targetId})
-               MERGE (a)-[r1:${link.type}]->(b)
-               SET r1.weight = $weight
-               WITH a, b
-               MERGE (b)-[r2:${link.type}]->(a)
-               SET r2.weight = $weight`,
-              { sourceId: article.nodeId, targetId: link.target, weight: link.weight }
-            );
-            edgeCreateCount += 2;
-          }
-        }
-
-        // Remove stale outgoing edges (edges that exist in DB but not in current wikilinks)
-        for (const existing of existingEdges) {
-          if (!desiredEdges.has(existing)) {
-            const colonIdx = existing.indexOf(':');
-            const edgeType = existing.slice(0, colonIdx);
-            const targetId = existing.slice(colonIdx + 1);
-            try {
-              await session.run(
-                `MATCH (a:Node {nodeId: $sourceId})-[r:${edgeType}]->(b:Node {nodeId: $targetId})
-                 DELETE r`,
-                { sourceId: article.nodeId, targetId }
-              );
-              edgeRemoveCount++;
-            } catch {
-              // Edge type may not be a managed type — ignore
-            }
-          }
-        }
-      }
-
-      log(`Created/updated ${edgeCreateCount} edges, removed ${edgeRemoveCount} stale edges`);
-    } finally {
-      await session.close();
     }
-  } finally {
-    await driver.close();
+    if (Object.keys(updates).length > 0 || deletedNodeIds.length > 0) {
+      const existing = await readEmbeddingsSidecar(config.knowledgeDir);
+      const merged = mergeEmbeddings(existing, updates, deletedNodeIds);
+      await writeEmbeddingsSidecar(config.knowledgeDir, merged);
+      log(
+        `Embeddings sidecar: +${Object.keys(updates).length} vector(s), ` +
+          `-${deletedNodeIds.length} deleted → _graph/embeddings.json ` +
+          `(${Object.keys(merged).length} total)`,
+      );
+    } else if (embeddedCount > 0) {
+      log(`Embeddings ready for ${embeddedCount}/${embeddings.length} article(s) (sidecar unchanged)`);
+    }
+  } catch (err) {
+    logError(`Embeddings sidecar write failed (non-blocking): ${err.message}`);
   }
+
+  // ── Step 6: Upsert nodes into the GraphStore ─────────────────────
+  // `putNodes` is a full-overwrite upsert keyed on (projectId, nodeId): re-running
+  // is idempotent, and two wave writers writing DIFFERENT nodes never collide.
+  const today = new Date().toISOString().split('T')[0];
+  let upsertCount = 0;
+  let pruneCount = 0;
+  let edgeCreateCount = 0;
+
+  // NOTE: the embedding vector is intentionally NOT stored on the node — S1.5
+  // moves vectors to a per-project sidecar. The rich wiki metadata is carried on
+  // `props`; the GraphStore currently persists only the SYSTEM_GRAPH_NODE_PROPS-
+  // allowlisted subset (graph-store.mjs), so a few article fields (summary / type /
+  // phase / maturity / tags / created*) do not yet round-trip — flagged for the
+  // S1.3 snapshot byte-compat / S0.2 allowlist coordination.
+  const wikiNodes = parsedArticles.map((article) => {
+    const fm = article.frontmatter;
+    return {
+      nodeId: article.nodeId,
+      // kind left unset → GraphStore defaults to 'file' (matches the old
+      // `coalesce(n.kind,'file')` snapshot behaviour for article nodes).
+      status: fm.status || 'active',
+      title: fm.title || article.nodeId,
+      updated: fm.updated || today,
+      props: {
+        type: fm.type || 'unknown',
+        phase: fm.phase || 'unknown',
+        maturity: typeof fm.maturity === 'number' ? fm.maturity : 0.1,
+        summary: article.summary,
+        tags: Array.isArray(fm.tags) ? fm.tags : [],
+        createdByEpic: fm.createdByEpic || '',
+        createdByStory: fm.createdByStory || '',
+        lastMutatedByStory: fm.lastMutatedByStory || '',
+        created: fm.created || today,
+      },
+    };
+  });
+  if (wikiNodes.length) {
+    await store.putNodes(config.project, wikiNodes);
+    upsertCount = wikiNodes.length;
+  }
+  log(`Upserted ${upsertCount} nodes`);
+
+  // Prune deleted articles (status flip, never a hard delete).
+  for (const deletedId of deletedNodeIds) {
+    const flipped = await store.setNodeAttrs(config.project, deletedId, {
+      status: 'pruned',
+      updated: today,
+    });
+    if (flipped) pruneCount++;
+  }
+  if (pruneCount > 0) {
+    log(`Pruned ${pruneCount} nodes`);
+  }
+
+  // ── Step 7: Create/update edges from wikilinks ───────────────────
+  // Edge CREATION only. The old read-then-DELETE stale-edge GC is dropped: the
+  // GraphStore exposes no per-edge delete, AND read-modify-delete is exactly the
+  // pattern that clobbers a concurrent writer's edge (wave width ≥2). `putEdges`
+  // is an idempotent upsert keyed on (src, edgeType|target), so re-running never
+  // duplicates and unchanged wikilinks keep a stable count. An edge forms only
+  // when the OTHER endpoint node exists (heir of the old `MATCH (a) MATCH (b)`),
+  // so a wikilink to a not-yet-materialized code node adds no phantom edge.
+  // Stale-wikilink GC is deferred pending a GraphStore deleteEdge primitive (S0.2 /
+  // S1.4 coordination).
+  for (const article of parsedArticles) {
+    const edges = [];
+    for (const link of article.wikilinks) {
+      const targetNode = await store.getNode(config.project, link.target);
+      if (!targetNode) continue; // the other endpoint must exist
+      if (link.direction === 'outgoing') {
+        edges.push({ type: link.type, from: article.nodeId, to: link.target, props: { weight: link.weight } });
+      } else if (link.direction === 'incoming') {
+        // Target → current article (reverse edge).
+        edges.push({ type: link.type, from: link.target, to: article.nodeId, props: { weight: link.weight } });
+      } else if (link.direction === 'bidirectional') {
+        edges.push({ type: link.type, from: article.nodeId, to: link.target, props: { weight: link.weight } });
+        edges.push({ type: link.type, from: link.target, to: article.nodeId, props: { weight: link.weight } });
+      }
+    }
+    if (edges.length) {
+      await store.putEdges(config.project, edges);
+      edgeCreateCount += edges.length;
+    }
+  }
+
+  log(`Created/updated ${edgeCreateCount} wikilink edges`);
 
   // ── Step 8: Update compile-state.json ────────────────────────────
   const newState = { ...currentHashes };
@@ -666,31 +660,31 @@ async function main() {
   log(`Updated compile-state.json (${Object.keys(newState).length} entries)`);
 
   // ── Step 8.4: AST grounding (Slice B) ────────────────────────────
-  await processAstFacts(config);
+  await processAstFacts(config, store);
 
   // ── Step 8.45: System graph grounding (Pipeline v3 / Epic 1) ─────
-  await processSystemGraphFacts(config);
+  await processSystemGraphFacts(config, store);
 
   // ── Step 8.455: Test-cover edges (W3.3) — dark unless P3_TEST_COVER_EDGES=on
-  await processTestCoverFacts(config);
+  await processTestCoverFacts(config, store);
 
   // ── Step 8.46: Agentic Document Center — subsystem shards + god docs ─
-  await processDocumentFacts(config);
+  await processDocumentFacts(config, store);
 
   // ── Step 8.47: Graph integrity — orphans + dead code (Epic 2) ────
-  await processGraphIntegrity(config);
+  await processGraphIntegrity(config, store);
 
   // ── Step 8.5: Graph snapshot for in-app visualization ────────────
-  await writeGraphSnapshot(config);
+  await writeGraphSnapshot(config, store);
 
   // ── Step 8.55: git-graph snapshot (GitGraph fallback — always fresh) ─
   await writeGitGraphSnapshotLocal(config);
 
   // ── Step 8.6: Architectural X-Ray analytics — insights.json (Epic 3) ─
-  await processGraphAnalytics(config);
+  await processGraphAnalytics(config, store);
 
   // ── Step 8.7: Cross-project contract spine — federation (Epic 5, --global) ─
-  await processFederation(config);
+  await processFederation(config, store);
 
   // ── Step 9: S3 Backup (non-blocking) ─────────────────────────────
   if (!config.skipBackup) {
@@ -740,7 +734,7 @@ function subNodeId(fileNodeId, kind, name) {
  * we set kind="file" on every file-level node we know about from AST_FACTS
  * so the graph snapshot can distinguish them.
  */
-async function processAstFacts(config) {
+async function processAstFacts(config, store) {
   const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
   const factsPath = join(myceliumDir, 'ast-facts.json');
   const fullFactsPath = join(myceliumDir, 'ast-facts.full.json');
@@ -797,8 +791,6 @@ async function processAstFacts(config) {
   const rootDir = join(config.knowledgeDir, '..');
   const aliasMap = loadAliasMap(rootDir);
 
-  const driver = createDriver();
-  const session = driver.session();
   const today = new Date().toISOString().split('T')[0];
   let funcUpserts = 0;
   let classUpserts = 0;
@@ -806,124 +798,125 @@ async function processAstFacts(config) {
   let importsEdges = 0;
   let callsEdges = 0;
   const backboneFiles = [];
+  // Every non-parseError scanned file gets a node in pass 1; pass 2 only forms an
+  // IMPORTS edge when the target is in this set (heir of the old `MATCH (a) MATCH
+  // (b)` both-endpoints-exist rule, without a per-edge store round-trip).
+  const createdFileNodeIds = new Set();
 
-  try {
+  // ── Pass 1: file / function / class nodes + DEFINES edges ──────────────
   for (const file of facts.files) {
     if (file.parseError) continue;
     const fileNodeId = fileToCodeNodeId(file.path);
     backboneFiles.push(file.path);
+    createdFileNodeIds.add(fileNodeId);
 
-    // Ensure the parent file node EXISTS (kind="file"). It may not yet if the
-    // Compiler hasn't written a wiki article for it — AST_FACTS covers more
-    // files than the article diff (test files, .feature.tsx, bare components).
-    // Previously we only SET kind on an existing node, which left every
-    // function in an article-less file with NO file→function DEFINES edge —
-    // i.e. orphaned. MERGE the file node so DEFINES always links; the Compiler
-    // enriches title/summary later. Matches the function-node MERGE pattern.
-    //
-    // projectId is OVERWRITTEN (not coalesced) to the canonical slug: early
-    // ingestion sometimes stamped a job/plan UUID as projectId, stranding the
-    // file node in a phantom partition so the DEFINES MATCH (which filters on
-    // projectId) silently missed and the function stayed orphaned forever.
-    // code/* nodeIds are project-unique (no cross-project collisions), and we
-    // are iterating THIS project's own scanned files, so normalizing to
-    // $projectId here is safe and self-heals stale UUID stamps on every sync.
-    await session.run(
-      `MERGE (n:Node {nodeId: $nodeId})
-       ON CREATE SET n.projectId = $projectId, n.kind = 'file', n.type = 'code',
-                     n.status = 'active', n.phase = 'implementation', n.title = $title
-       ON MATCH SET n.kind = CASE WHEN n.kind IS NULL OR n.kind = '' THEN 'file' ELSE n.kind END,
-                    n.projectId = $projectId`,
-      { nodeId: fileNodeId, projectId: config.project, title: file.path }
-    );
+    // Ensure the parent file node EXISTS (kind='file') so DEFINES always links —
+    // AST_FACTS covers more files than the article diff (test files, bare
+    // components). Do NOT clobber an existing wiki node's fields: create only
+    // when missing; otherwise just (re)assert `file` so the file-index GSI
+    // (get_file_symbols, S2.1) resolves. projectId is the store partition key, so
+    // the old "self-heal a stale UUID projectId" step is structurally unnecessary.
+    const existingFile = await store.getNode(config.project, fileNodeId);
+    if (!existingFile) {
+      await store.putNodes(config.project, [
+        {
+          nodeId: fileNodeId,
+          kind: 'file',
+          file: file.path,
+          title: file.path,
+          status: 'active',
+          props: { type: 'code', phase: 'implementation' },
+        },
+      ]);
+    } else if (existingFile.file !== file.path) {
+      await store.setNodeAttrs(config.project, fileNodeId, { file: file.path });
+    }
 
     // Functions
     for (const fn of file.functions || []) {
       const fnNodeId = subNodeId(fileNodeId, 'function', fn.name);
-      await session.run(
-        `MERGE (n:Node {nodeId: $nodeId})
-         SET n.projectId = $projectId, n.kind = 'function',
-             n.name = $name, n.fnKind = $fnKind,
-             n.exported = $exported, n.params = $params,
-             n.line = $line, n.endLine = $endLine,
-             n.parentFile = $parentFile, n.className = $className,
-             n.title = $title,
-             n.type = 'code', n.status = 'active', n.phase = 'implementation'`,
+      await store.putNodes(config.project, [
         {
           nodeId: fnNodeId,
-          projectId: config.project,
-          name: fn.name,
-          fnKind: fn.kind || 'function',
-          exported: !!fn.exported,
-          params: Array.isArray(fn.params) ? fn.params : [],
-          line: fn.line ?? 0,
-          endLine: fn.endLine ?? 0,
-          parentFile: fileNodeId,
-          className: fn.className ?? '',
+          kind: 'function',
+          file: file.path,
           title: fn.className ? `${fn.className}.${fn.name}()` : `${fn.name}()`,
-        }
-      );
+          status: 'active',
+          updated: today,
+          props: {
+            name: fn.name,
+            fnKind: fn.kind || 'function',
+            exported: !!fn.exported,
+            params: Array.isArray(fn.params) ? fn.params : [],
+            line: fn.line ?? 0,
+            endLine: fn.endLine ?? 0,
+            parentFile: fileNodeId,
+            className: fn.className ?? '',
+            type: 'code',
+            phase: 'implementation',
+          },
+        },
+      ]);
       funcUpserts++;
 
-      // file -[:DEFINES]-> function
-      await session.run(
-        `MATCH (f:Node {nodeId: $fileId, projectId: $projectId})
-         MATCH (fn:Node {nodeId: $fnId})
-         MERGE (f)-[:DEFINES]->(fn)`,
-        { fileId: fileNodeId, fnId: fnNodeId, projectId: config.project }
-      );
+      // file -[:DEFINES]-> function (both endpoints exist by construction)
+      await store.putEdges(config.project, [
+        { type: 'DEFINES', from: fileNodeId, to: fnNodeId },
+      ]);
       definesEdges++;
     }
 
     // Classes
     for (const cls of file.classes || []) {
       const clsNodeId = subNodeId(fileNodeId, 'class', cls.name);
-      await session.run(
-        `MERGE (n:Node {nodeId: $nodeId})
-         SET n.projectId = $projectId, n.kind = 'class',
-             n.name = $name, n.extends = $extendsName,
-             n.line = $line, n.endLine = $endLine,
-             n.parentFile = $parentFile,
-             n.title = $title,
-             n.type = 'code', n.status = 'active', n.phase = 'implementation'`,
+      await store.putNodes(config.project, [
         {
           nodeId: clsNodeId,
-          projectId: config.project,
-          name: cls.name,
-          extendsName: cls.extends ?? '',
-          line: cls.line ?? 0,
-          endLine: cls.endLine ?? 0,
-          parentFile: fileNodeId,
+          kind: 'class',
+          file: file.path,
           title: `class ${cls.name}`,
-        }
-      );
+          status: 'active',
+          updated: today,
+          props: {
+            name: cls.name,
+            extends: cls.extends ?? '',
+            line: cls.line ?? 0,
+            endLine: cls.endLine ?? 0,
+            parentFile: fileNodeId,
+            type: 'code',
+            phase: 'implementation',
+          },
+        },
+      ]);
       classUpserts++;
 
-      await session.run(
-        `MATCH (f:Node {nodeId: $fileId, projectId: $projectId})
-         MATCH (c:Node {nodeId: $clsId})
-         MERGE (f)-[:DEFINES]->(c)`,
-        { fileId: fileNodeId, clsId: clsNodeId, projectId: config.project }
-      );
+      await store.putEdges(config.project, [
+        { type: 'DEFINES', from: fileNodeId, to: clsNodeId },
+      ]);
       definesEdges++;
     }
+  }
+
+  // ── Pass 2: IMPORTS (file → file) + CALLS (same-file) ──────────────────
+  // Deferred to a second pass so ALL scanned file nodes exist before edges form —
+  // this removes the old single-pass ordering hazard (a file importing a
+  // not-yet-processed file silently lost its IMPORTS edge).
+  for (const file of facts.files) {
+    if (file.parseError) continue;
+    const fileNodeId = fileToCodeNodeId(file.path);
 
     // Imports — file → file edges for relative imports we can resolve.
     for (const imp of file.imports || []) {
       const resolved = resolveImportSource(file.path, imp.source, knownFiles, { aliasMap, rootDir });
       if (!resolved) continue; // external or unresolvable — skip silently
       const targetNodeId = fileToCodeNodeId(resolved);
-      // Only create the edge if both endpoints exist as :Node already.
-      // If the target file doesn't have a wiki article yet we skip — Slice
-      // C (brownfield bootstrap) will seed orphan files later.
-      const r = await session.run(
-        `MATCH (a:Node {nodeId: $fromId, projectId: $projectId})
-         MATCH (b:Node {nodeId: $toId, projectId: $projectId})
-         MERGE (a)-[:IMPORTS]->(b)
-         RETURN 1`,
-        { fromId: fileNodeId, toId: targetNodeId, projectId: config.project }
-      );
-      if (r.records.length > 0) importsEdges++;
+      // Both endpoints must exist as nodes (target may be a parseError file with
+      // no node) — the heir of the old `MATCH (a) MATCH (b) MERGE`.
+      if (!createdFileNodeIds.has(targetNodeId)) continue;
+      await store.putEdges(config.project, [
+        { type: 'IMPORTS', from: fileNodeId, to: targetNodeId },
+      ]);
+      importsEdges++;
     }
 
     // Calls — same-file resolution only for v1. Cross-file calls need
@@ -936,12 +929,9 @@ async function processAstFacts(config) {
       const callerId = functionsInFile.get(call.fromFunction);
       const calleeId = functionsInFile.get(call.callee);
       if (!callerId || !calleeId) continue;
-      await session.run(
-        `MATCH (caller:Node {nodeId: $callerId})
-         MATCH (callee:Node {nodeId: $calleeId})
-         MERGE (caller)-[:CALLS]->(callee)`,
-        { callerId, calleeId }
-      );
+      await store.putEdges(config.project, [
+        { type: 'CALLS', from: callerId, to: calleeId },
+      ]);
       callsEdges++;
     }
   }
@@ -950,43 +940,38 @@ async function processAstFacts(config) {
     `AST grounding: ${funcUpserts} functions, ${classUpserts} classes, ${definesEdges} DEFINES, ${importsEdges} IMPORTS, ${callsEdges} CALLS`
   );
 
-  // ── Story 2.1: containment backbone (dir ─CONTAINS→ file) ──────────────
-  // Emitted unconditionally so no file node is ever degree-0 for purely
-  // structural reasons — and so the dead-code detector (2.3) can use a
-  // different query than the orphan invariant (2.2).
-  const { dirNodes, containsEdges } = await emitContainmentBackbone(
-    session,
-    config.project,
-    backboneFiles,
-    today,
-  );
-  log(`Containment backbone: ${dirNodes} dir nodes, ${containsEdges} CONTAINS edges`);
-
-  // ── F15: delete-aware prune (gated to the authoritative full-project scan) ─
-  // Additive ingest leaves zombie code nodes for files deleted on disk. Only an
-  // authoritative full scan (NOT a partial worktree scan) has a trustworthy
-  // complete file set, so the prune is gated on isAuthoritativeFullScan. We
-  // prune by absence-from-scan (never by edge count), so legitimately edgeless
-  // nodes that still exist on disk (e.g. test files) are preserved.
-  if (isAuthoritativeFullScan) {
-    const { prunedFiles, prunedSubNodes, prunedIds } = await pruneDeletedCodeNodes(
-      session,
+  // ── Containment backbone (Story 2.1) + delete-aware prune (F15) ────────────
+  // S1.4: `emitContainmentBackbone`/`pruneDeletedCodeNodes` now run on the
+  // GraphStore (the legacy Memgraph session seam is gone) — still wrapped
+  // non-blocking so a store hiccup can't abort the already-persisted writes
+  // above it.
+  try {
+    const { dirNodes, containsEdges } = await emitContainmentBackbone(
+      store,
       config.project,
       backboneFiles,
       today,
     );
-    if (prunedFiles > 0 || prunedSubNodes > 0) {
-      log(
-        `AST prune (deleted source): ${prunedFiles} file node(s), ${prunedSubNodes} sub-node(s) marked pruned`,
+    log(`Containment backbone: ${dirNodes} dir nodes, ${containsEdges} CONTAINS edges`);
+
+    if (isAuthoritativeFullScan) {
+      const { prunedFiles, prunedSubNodes, prunedIds } = await pruneDeletedCodeNodes(
+        store,
+        config.project,
+        backboneFiles,
+        today,
       );
-      for (const id of prunedIds.slice(0, 20)) log(`  PRUNED: ${id}`);
+      if (prunedFiles > 0 || prunedSubNodes > 0) {
+        log(
+          `AST prune (deleted source): ${prunedFiles} file node(s), ${prunedSubNodes} sub-node(s) marked pruned`,
+        );
+        for (const id of prunedIds.slice(0, 20)) log(`  PRUNED: ${id}`);
+      }
+    } else {
+      log('AST prune skipped — partial worktree scan is not authoritative for deletions');
     }
-  } else {
-    log('AST prune skipped — partial worktree scan is not authoritative for deletions');
-  }
-  } finally {
-    await session.close();
-    await driver.close();
+  } catch (err) {
+    logError(`containment-backbone/prune pass failed (non-blocking): ${err.message}`);
   }
 }
 
@@ -1012,7 +997,7 @@ async function processAstFacts(config) {
  * exist (never creates nodes → preserves the orphan/dead-code invariants), exactly
  * like the IMPORTS block.
  */
-async function processTestCoverFacts(config) {
+async function processTestCoverFacts(config, store) {
   try {
     if (process.env.P3_TEST_COVER_EDGES !== 'on') return; // dark by default
     const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
@@ -1028,33 +1013,32 @@ async function processTestCoverFacts(config) {
     const edges = Array.isArray(doc?.edges) ? doc.edges : [];
     if (!edges.length) return;
 
-    const driver = createDriver();
-    const session = driver.session();
+    const today = new Date().toISOString().split('T')[0];
     let testsEdges = 0;
-    try {
-      for (const e of edges) {
-        if (!e || e.type !== 'TESTS' || !e.from || !e.to) continue;
-        const fromId = fileToCodeNodeId(e.from);
-        const toId = fileToCodeNodeId(e.to);
-        const r = await session.run(
-          `MATCH (a:Node {nodeId: $fromId, projectId: $projectId})
-           MATCH (b:Node {nodeId: $toId, projectId: $projectId})
-           MERGE (a)-[:TESTS]->(b)
-           RETURN 1`,
-          { fromId, toId, projectId: config.project },
-        );
-        if (r.records.length > 0) testsEdges++;
+    for (const e of edges) {
+      if (!e || e.type !== 'TESTS' || !e.from || !e.to) continue;
+      const fromId = fileToCodeNodeId(e.from);
+      const toId = fileToCodeNodeId(e.to);
+      // MERGE-only-when-both-endpoints-exist (never creates nodes → preserves the
+      // orphan/dead-code invariants), exactly like the IMPORTS block.
+      const [a, b] = await Promise.all([
+        store.getNode(config.project, fromId),
+        store.getNode(config.project, toId),
+      ]);
+      if (a && b) {
+        await store.putEdges(config.project, [
+          { type: 'TESTS', from: fromId, to: toId, props: { updated: today } },
+        ]);
+        testsEdges++;
       }
-      log(`Test-cover grounding: ${testsEdges} TESTS edges (${edges.length} candidate)`);
-    } finally {
-      await session.close();
     }
+    log(`Test-cover grounding: ${testsEdges} TESTS edges (${edges.length} candidate)`);
   } catch (err) {
     logError(`test-cover pass failed (non-blocking): ${err.message}`);
   }
 }
 
-async function processSystemGraphFacts(config) {
+async function processSystemGraphFacts(config, store) {
   const myceliumDir = join(config.knowledgeDir, '..', '.mycelium');
   const readJson = async (file) => {
     const p = join(myceliumDir, file);
@@ -1088,56 +1072,50 @@ async function processSystemGraphFacts(config) {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const driver = createDriver();
-  const session = driver.session();
   let totalNodes = 0;
   let totalEdges = 0;
 
-  try {
-    // 1) Ingest infra / route / service nodes + edges (idempotent).
-    for (const [name, doc] of factDocs) {
-      const { nodeUpserts, edgeUpserts, skippedEdges } = await upsertExtractedFacts(
-        session,
-        config.project,
-        doc,
-        today,
-      );
-      totalNodes += nodeUpserts;
-      totalEdges += edgeUpserts;
-      if (skippedEdges.length > 0) {
-        log(`system-graph ${name}: ${skippedEdges.length} edges/nodes skipped (unresolved or not allowlisted)`);
-      }
+  // 1) Ingest infra / route / service nodes + edges (idempotent). The ingest
+  // functions (lib/system-graph-ingest.mjs) take the GraphStore directly (S1.2).
+  for (const [name, doc] of factDocs) {
+    const { nodeUpserts, edgeUpserts, skippedEdges } = await upsertExtractedFacts(
+      store,
+      config.project,
+      doc,
+      today,
+    );
+    totalNodes += nodeUpserts;
+    totalEdges += edgeUpserts;
+    if (skippedEdges.length > 0) {
+      log(`system-graph ${name}: ${skippedEdges.length} edges/nodes skipped (unresolved or not allowlisted)`);
     }
-    log(`System graph grounding: ${totalNodes} nodes, ${totalEdges} edges from ${factDocs.length} extractor(s)`);
+  }
+  log(`System graph grounding: ${totalNodes} nodes, ${totalEdges} edges from ${factDocs.length} extractor(s)`);
 
-    // 2) Env-join — File ─READS→ Table/Secret (W4 accessor-aware, W7 Resource.*).
-    if (infraDoc && astDoc?.envRefsByFile) {
-      const { directReads, transitiveReads } = await upsertEnvReads(
-        session,
-        config.project,
-        infraDoc,
-        astDoc.envRefsByFile,
-        today,
-      );
-      log(`System graph env-join: ${directReads} direct + ${transitiveReads} transitive READS`);
-    }
+  // 2) Env-join — File ─READS→ Table/Secret (W4 accessor-aware, W7 Resource.*).
+  if (infraDoc && astDoc?.envRefsByFile) {
+    const { directReads, transitiveReads } = await upsertEnvReads(
+      store,
+      config.project,
+      infraDoc,
+      astDoc.envRefsByFile,
+      today,
+    );
+    log(`System graph env-join: ${directReads} direct + ${transitiveReads} transitive READS`);
+  }
 
-    // 3) CALLS_ENDPOINT — component → endpoint (W1), api-client paths under /api.
-    if (routeDoc?.nodes && apiCallsDoc?.calls) {
-      const endpoints = routeDoc.nodes.filter((n) => n.kind === 'endpoint');
-      const { edgeUpserts } = await upsertCallsEndpoint(
-        session,
-        config.project,
-        apiCallsDoc.calls,
-        endpoints,
-        today,
-        { basePath: '/api' },
-      );
-      log(`System graph CALLS_ENDPOINT: ${edgeUpserts} edges`);
-    }
-  } finally {
-    await session.close();
-    await driver.close();
+  // 3) CALLS_ENDPOINT — component → endpoint (W1), api-client paths under /api.
+  if (routeDoc?.nodes && apiCallsDoc?.calls) {
+    const endpoints = routeDoc.nodes.filter((n) => n.kind === 'endpoint');
+    const { edgeUpserts } = await upsertCallsEndpoint(
+      store,
+      config.project,
+      apiCallsDoc.calls,
+      endpoints,
+      today,
+      { basePath: '/api' },
+    );
+    log(`System graph CALLS_ENDPOINT: ${edgeUpserts} edges`);
   }
 }
 
@@ -1195,7 +1173,7 @@ export function resolveGovernsTargets(tp, codeNodeIds) {
  * Prototype / empty project (no ast-facts files ⇒ no shards) → log + skip,
  * zero nodes, byte-identical to today.
  */
-async function processDocumentFacts(config) {
+async function processDocumentFacts(config, store) {
   const root = join(config.knowledgeDir, '..');
   const subsysEnv = extractSubsystems(root);
   const shardNodes = (subsysEnv.nodes || []).filter((n) => n.kind === 'docShard');
@@ -1214,17 +1192,13 @@ async function processDocumentFacts(config) {
   const { nodes: conceptNodes } = extractConceptDocs(root);
   const conceptDocs = conceptNodes.filter((n) => n.kind === 'document');
 
-  const driver = createDriver();
-  const session = driver.session();
   try {
-    // The set of existing code nodeIds — the GOVERNS resolution domain.
-    const codeRes = await session.run(
-      `MATCH (n:Node {projectId: $projectId, kind: 'file'})
-       WHERE coalesce(n.status,'active') <> 'pruned'
-       RETURN n.nodeId AS id`,
-      { projectId: slug },
+    // The set of existing code nodeIds — the GOVERNS resolution domain
+    // (kind-index query, non-pruned only).
+    const fileNodes = await store.queryByKind(slug, 'file');
+    const codeNodeIds = new Set(
+      fileNodes.filter((n) => (n.status ?? 'active') !== 'pruned').map((n) => n.nodeId),
     );
-    const codeNodeIds = new Set(codeRes.records.map((r) => r.get('id')));
 
     // 1) Ingest docShard nodes + DEPENDS_ON edges + the godDoc node + CONTAINS.
     const godNode = {
@@ -1246,7 +1220,7 @@ async function processDocumentFacts(config) {
       edges: [...(subsysEnv.edges || []), ...containsEdges],
     };
     const { nodeUpserts, edgeUpserts, skippedEdges } = await upsertDocFacts(
-      session,
+      store,
       slug,
       ingestDoc,
       today,
@@ -1256,6 +1230,8 @@ async function processDocumentFacts(config) {
     }
 
     // 2) docShard GOVERNS its member code nodes (touchPointToNodeId / glob-intersect).
+    // Both endpoints exist by construction: the shard was just ingested and every
+    // matched target came out of the store's code-node set.
     let governsEdges = 0;
     const ambiguous = [...(subsysEnv.ambiguous || [])];
     for (const shard of shardNodes) {
@@ -1263,65 +1239,53 @@ async function processDocumentFacts(config) {
         const { matched, ambiguous: amb } = resolveGovernsTargets(member, codeNodeIds);
         ambiguous.push(...amb);
         for (const target of matched) {
-          await session.run(
-            `MATCH (a:Node {nodeId: $s}) MATCH (b:Node {nodeId: $t})
-             MERGE (a)-[r:GOVERNS]->(b) SET r.updated = $today, r.provenance = 'EXTRACTED'`,
-            { s: shard.nodeId, t: target, today },
-          );
+          await store.putEdges(slug, [
+            { type: 'GOVERNS', from: shard.nodeId, to: target, props: { updated: today, provenance: 'EXTRACTED' } },
+          ]);
           governsEdges++;
         }
       }
     }
 
-    // 3) PROPOSES: each concept document → the godDoc (intention edge).
+    // 3) PROPOSES: each concept document → the godDoc (intention edge). The
+    // concept document node may not be ingested here (doc-extract runs its own
+    // ingest elsewhere); create it only when missing (ON CREATE semantics — never
+    // clobber a richer existing node), then form the edge to the godDoc.
     let proposesEdges = 0;
     for (const doc of conceptDocs) {
-      // The concept document node may not be ingested in this session (doc-extract
-      // runs its own ingest elsewhere); MERGE the source node defensively so the
-      // intention edge always forms, then the edge.
-      await session.run(
-        `MERGE (a:Node {nodeId: $s})
-           ON CREATE SET a.kind = $kind, a.projectId = $projectId, a.label = $label,
-                         a.docType = $docType, a.status = 'active', a.updated = $today
-         WITH a
-         MATCH (b:Node {nodeId: $t})
-         MERGE (a)-[r:PROPOSES]->(b) SET r.updated = $today, r.provenance = 'EXTRACTED'`,
-        {
-          s: doc.nodeId,
-          t: godDocId,
-          kind: 'document',
-          projectId: slug,
-          label: doc.label ?? doc.nodeId,
-          docType: doc.docType ?? null,
-          today,
-        },
-      );
+      const existingDoc = await store.getNode(slug, doc.nodeId);
+      if (!existingDoc) {
+        await store.putNodes(slug, [
+          {
+            nodeId: doc.nodeId,
+            kind: 'document',
+            label: doc.label ?? doc.nodeId,
+            status: 'active',
+            updated: today,
+            props: doc.docType ? { docType: doc.docType } : {},
+          },
+        ]);
+      }
+      await store.putEdges(slug, [
+        { type: 'PROPOSES', from: doc.nodeId, to: godDocId, props: { updated: today, provenance: 'EXTRACTED' } },
+      ]);
       proposesEdges++;
     }
 
     // 4) Prune-on-tombstone: docShards no longer produced by the current extract.
+    // The status flip (via setNodeAttrs) removes the shard from the live
+    // projection. NOTE: the old code ALSO deleted the shard's outgoing GOVERNS/
+    // DEPENDS_ON + incoming CONTAINS edges; the GraphStore exposes no per-edge
+    // delete, so that stale-edge GC is deferred pending a deleteEdge primitive
+    // (S0.2 / S1.4 coordination) — the tombstoned shard is still excluded from
+    // the live graph by its `status: 'pruned'`.
     const liveShardKeys = new Set(shardNodes.map((n) => n.nodeId));
-    const existing = await session.run(
-      `MATCH (n:Node {projectId: $projectId, kind: 'docShard'})
-       WHERE coalesce(n.status,'active') <> 'pruned'
-       RETURN n.nodeId AS id`,
-      { projectId: slug },
-    );
+    const existingShards = await store.queryByKind(slug, 'docShard');
     let prunedShards = 0;
-    for (const rec of existing.records) {
-      const id = rec.get('id');
-      if (liveShardKeys.has(id)) continue;
-      // Vanished module boundary — tombstone it and drop its outgoing GOVERNS/
-      // CONTAINS/DEPENDS_ON edges so edges to deleted shards never accumulate.
-      await session.run(
-        `MATCH (n:Node {nodeId: $id}) SET n.status = 'pruned', n.updated = $today
-         WITH n OPTIONAL MATCH (n)-[r:GOVERNS|DEPENDS_ON]->() DELETE r`,
-        { id, today },
-      );
-      await session.run(
-        `MATCH (g:Node)-[r:CONTAINS]->(n:Node {nodeId: $id}) DELETE r`,
-        { id },
-      );
+    for (const node of existingShards) {
+      if ((node.status ?? 'active') === 'pruned') continue;
+      if (liveShardKeys.has(node.nodeId)) continue;
+      await store.setNodeAttrs(slug, node.nodeId, { status: 'pruned', updated: today });
       prunedShards++;
     }
 
@@ -1360,12 +1324,9 @@ async function processDocumentFacts(config) {
         ((subsysEnv.cycles || []).length ? `, ${subsysEnv.cycles.length} dep-cycle(s) reported` : ''),
     );
   } catch (err) {
-    // Non-blocking like the snapshot/analytics steps — a missing Memgraph or a
-    // query error must not fail the sync; real extractor bugs surface via orphans.
+    // Non-blocking like the snapshot/analytics steps — a store or query error
+    // must not fail the sync; real extractor bugs surface via the orphan check.
     logError(`document-center pass failed (non-blocking): ${err.message}`);
-  } finally {
-    await session.close();
-    await driver.close();
   }
 }
 
@@ -1404,7 +1365,7 @@ async function readPreviousGenuineOrphans(graphDir) {
   }
 }
 
-async function processGraphIntegrity(config) {
+async function processGraphIntegrity(config, store) {
   const graphDir = join(config.knowledgeDir, '_graph');
   const writeReport = async (name, doc) => {
     await mkdir(graphDir, { recursive: true });
@@ -1414,120 +1375,105 @@ async function processGraphIntegrity(config) {
     await rename(tmp, p);
   };
 
-  let driver;
   try {
-    driver = createDriver();
-    const session = driver.session();
-    try {
-      const generatedAt = new Date().toISOString();
+    const generatedAt = new Date().toISOString();
 
-      // ── Story 2.2: orphan invariant ──────────────────────────────────
-      const { orphans } = await reportOrphans(session, config.project);
+    // ── Story 2.2: orphan invariant ──────────────────────────────────
+    const { orphans } = await reportOrphans(store, config.project);
 
-      // F16: the genuine-orphan signal — orphans MINUS legitimate floaters
-      // (new/test/zombie files + decision docs awaiting linking). Read the prior
-      // genuine count so a single NEW genuine orphan is visible as a +delta even
-      // when a noisy floater backlog exists.
-      const previousGenuine = await readPreviousGenuineOrphans(graphDir);
-      const attentionThreshold = Number(process.env.GRAPH_ORPHAN_ATTENTION_THRESHOLD ?? 1);
-      const {
-        byKind,
-        genuine: hardFail,
-        legitimate,
-        genuineOrphanCount,
-        legitimateFloaterCount,
-        delta,
-        needsAttention,
-      } = classifyGenuineOrphans(orphans, { previousGenuine, attentionThreshold });
-      const blocked = genuineOrphanCount > 0;
-      await writeReport('orphans.json', {
-        projectId: config.project,
-        generatedAt,
-        status: blocked ? 'fail' : 'pass',
-        orphanCount: orphans.length,
-        // F16: genuine vs legitimate split, surfaced for the wave gate.
-        genuineOrphanCount,
-        legitimateFloaterCount,
-        previousGenuineOrphanCount: previousGenuine,
-        genuineOrphanDelta: delta,
-        attentionThreshold,
-        needsAttention,
-        hardFailCount: hardFail.length,
-        byKind,
-        orphans,
-        legitimateFloaters: legitimate,
-        hardFail,
-      });
+    // F16: the genuine-orphan signal — orphans MINUS legitimate floaters
+    // (new/test/zombie files + decision docs awaiting linking). Read the prior
+    // genuine count so a single NEW genuine orphan is visible as a +delta even
+    // when a noisy floater backlog exists.
+    const previousGenuine = await readPreviousGenuineOrphans(graphDir);
+    const attentionThreshold = Number(process.env.GRAPH_ORPHAN_ATTENTION_THRESHOLD ?? 1);
+    const {
+      byKind,
+      genuine: hardFail,
+      legitimate,
+      genuineOrphanCount,
+      legitimateFloaterCount,
+      delta,
+      needsAttention,
+    } = classifyGenuineOrphans(orphans, { previousGenuine, attentionThreshold });
+    const blocked = genuineOrphanCount > 0;
+    await writeReport('orphans.json', {
+      projectId: config.project,
+      generatedAt,
+      status: blocked ? 'fail' : 'pass',
+      orphanCount: orphans.length,
+      // F16: genuine vs legitimate split, surfaced for the wave gate.
+      genuineOrphanCount,
+      legitimateFloaterCount,
+      previousGenuineOrphanCount: previousGenuine,
+      genuineOrphanDelta: delta,
+      attentionThreshold,
+      needsAttention,
+      hardFailCount: hardFail.length,
+      byKind,
+      orphans,
+      legitimateFloaters: legitimate,
+      hardFail,
+    });
 
-      // F16: a compact wave-gate field the pipeline can consume without parsing
-      // the full orphan list. The compile-sync step / wave gate reads this.
-      await writeReport('orphan-signal.json', {
-        projectId: config.project,
-        generatedAt,
-        genuineOrphanCount,
-        legitimateFloaterCount,
-        previousGenuineOrphanCount: previousGenuine,
-        delta,
-        attentionThreshold,
-        needsAttention,
-        status: blocked ? 'fail' : 'pass',
-      });
+    // F16: a compact wave-gate field the pipeline can consume without parsing
+    // the full orphan list. The compile-sync step / wave gate reads this.
+    await writeReport('orphan-signal.json', {
+      projectId: config.project,
+      generatedAt,
+      genuineOrphanCount,
+      legitimateFloaterCount,
+      previousGenuineOrphanCount: previousGenuine,
+      delta,
+      attentionThreshold,
+      needsAttention,
+      status: blocked ? 'fail' : 'pass',
+    });
 
-      // ── Story 2.3: dead-code detector ────────────────────────────────
-      const deadCode = await reportDeadCode(session, config.project);
-      await writeReport('dead-code.json', {
-        projectId: config.project,
-        generatedAt,
-        count: deadCode.length,
-        candidates: deadCode,
-      });
+    // ── Story 2.3: dead-code detector ────────────────────────────────
+    const deadCode = await reportDeadCode(store, config.project);
+    await writeReport('dead-code.json', {
+      projectId: config.project,
+      generatedAt,
+      count: deadCode.length,
+      candidates: deadCode,
+    });
 
-      const deltaStr =
-        delta == null ? 'no prior baseline' : `${delta >= 0 ? '+' : ''}${delta} vs prior`;
-      if (blocked) {
-        // Wave-gate gating hook: a non-`file` orphan is an extractor bug, not a
-        // finding. Surface it loudly and fail the step (the compile-sync shell
-        // step maps a non-zero exit → pipeline failure → blocked wave gate).
-        const summary = hardFail
-          .map((o) => `${o.kind}:${o.id}`)
-          .slice(0, 20)
-          .join(', ');
+    const deltaStr =
+      delta == null ? 'no prior baseline' : `${delta >= 0 ? '+' : ''}${delta} vs prior`;
+    if (blocked) {
+      // Wave-gate gating hook: a non-`file` orphan is an extractor bug, not a
+      // finding. Surface it loudly and fail the step (the compile-sync shell
+      // step maps a non-zero exit → pipeline failure → blocked wave gate).
+      const summary = hardFail
+        .map((o) => `${o.kind}:${o.id}`)
+        .slice(0, 20)
+        .join(', ');
+      logError(
+        `Orphan invariant FAILED — ${genuineOrphanCount} genuine orphan(s) (${deltaStr}; ` +
+          `${legitimateFloaterCount} legitimate floater(s) excluded; extractor dropped an edge): ${summary}`,
+      );
+      // F16: above-threshold genuine orphans warrant an operator attention
+      // signal, distinct from the generic non-zero exit, so the wave gate /
+      // operator dashboard can route it.
+      if (needsAttention) {
         logError(
-          `Orphan invariant FAILED — ${genuineOrphanCount} genuine orphan(s) (${deltaStr}; ` +
-            `${legitimateFloaterCount} legitimate floater(s) excluded; extractor dropped an edge): ${summary}`,
-        );
-        // F16: above-threshold genuine orphans warrant an operator attention
-        // signal, distinct from the generic non-zero exit, so the wave gate /
-        // operator dashboard can route it.
-        if (needsAttention) {
-          logError(
-            `[operator-attention] graph knowledge-compile: ${genuineOrphanCount} genuine orphan(s) ` +
-              `≥ threshold ${attentionThreshold} (${deltaStr}) — see _graph/orphan-signal.json`,
-          );
-        }
-        process.exitCode = 3;
-      } else {
-        log(
-          `Graph integrity OK: ${genuineOrphanCount} genuine orphan(s), ` +
-            `${legitimateFloaterCount} legitimate floater(s), ${deadCode.length} dead-code candidate(s)`,
+          `[operator-attention] graph knowledge-compile: ${genuineOrphanCount} genuine orphan(s) ` +
+            `≥ threshold ${attentionThreshold} (${deltaStr}) — see _graph/orphan-signal.json`,
         );
       }
-    } finally {
-      await session.close();
-      await driver.close();
+      process.exitCode = 3;
+    } else {
+      log(
+        `Graph integrity OK: ${genuineOrphanCount} genuine orphan(s), ` +
+          `${legitimateFloaterCount} legitimate floater(s), ${deadCode.length} dead-code candidate(s)`,
+      );
     }
   } catch (err) {
-    // Infrastructure failure (no Memgraph, etc.) — non-blocking, like the
+    // Store failure (e.g. Dynamo unreachable) — non-blocking, like the
     // snapshot/backup steps. A real extractor bug surfaces via the orphan query
     // above, not here.
     logError(`graph-integrity check failed (non-blocking): ${err.message}`);
-    if (driver) {
-      try {
-        await driver.close();
-      } catch {
-        /* already closed */
-      }
-    }
   }
 }
 
@@ -1542,51 +1488,36 @@ async function processGraphIntegrity(config) {
  *   - Story 3.3: surprising connections (cross-community high-centrality edges)
  *
  * A DISTINCT, post-sync read+annotate pass — it never touches the ingest
- * write-path. Fully non-blocking: a missing MAGE install (or no Memgraph at all)
- * degrades to a well-formed insights.json with the dimension's `*Available` flag
- * false, and never fails the sync.
+ * write-path. Fully non-blocking: an empty project graph (or a store error)
+ * degrades to a well-formed insights.json with the dimension's `*Available`
+ * flag false, and never fails the sync.
  */
-async function processGraphAnalytics(config) {
+async function processGraphAnalytics(config, store) {
   const graphDir = join(config.knowledgeDir, '_graph');
   const threshold = config.centralityThreshold ?? 0;
 
-  let driver;
   try {
-    driver = createDriver();
-    const session = driver.session();
-    try {
-      const generatedAt = new Date().toISOString();
-      const analytics = await runAnalytics(session, config.project, { threshold, logger: log });
-      const doc = buildInsightsDoc({ projectId: config.project, generatedAt, analytics, threshold });
+    const generatedAt = new Date().toISOString();
+    const analytics = await runAnalytics(store, config.project, { threshold, logger: log });
+    const doc = buildInsightsDoc({ projectId: config.project, generatedAt, analytics, threshold });
 
-      await mkdir(graphDir, { recursive: true });
-      const p = join(graphDir, 'insights.json');
-      const tmp = p + '.tmp';
-      await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
-      await rename(tmp, p);
+    await mkdir(graphDir, { recursive: true });
+    const p = join(graphDir, 'insights.json');
+    const tmp = p + '.tmp';
+    await writeFile(tmp, JSON.stringify(doc, null, 2), 'utf-8');
+    await rename(tmp, p);
 
-      if (analytics.mageAvailable) {
-        log(
-          `Graph analytics: ${analytics.godNodes.length} god-node(s), ` +
-            `${analytics.communities.length} communit${analytics.communities.length === 1 ? 'y' : 'ies'}, ` +
-            `${analytics.surprising.length} surprising connection(s)`,
-        );
-      } else {
-        log('Graph analytics: MAGE unavailable — wrote empty insights.json (overlay disabled in UI)');
-      }
-    } finally {
-      await session.close();
-      await driver.close();
+    if (analytics.mageAvailable) {
+      log(
+        `Graph analytics: ${analytics.godNodes.length} god-node(s), ` +
+          `${analytics.communities.length} communit${analytics.communities.length === 1 ? 'y' : 'ies'}, ` +
+          `${analytics.surprising.length} surprising connection(s)`,
+      );
+    } else {
+      log('Graph analytics: empty graph — wrote empty insights.json (overlay disabled in UI)');
     }
   } catch (err) {
     logError(`graph-analytics pass failed (non-blocking): ${err.message}`);
-    if (driver) {
-      try {
-        await driver.close();
-      } catch {
-        /* already closed */
-      }
-    }
   }
 }
 
@@ -1599,27 +1530,33 @@ function headCommit(cwd) {
   });
 }
 
-/** Read this project's contract-bearing nodes with their shape props. */
-async function readProjectContracts(session, projectId) {
-  const r = await session.run(
-    `MATCH (n:Node {projectId: $projectId}) WHERE n.kind IN $kinds
-     RETURN n.nodeId AS nodeId, n.kind AS kind, n.name AS name,
-            coalesce(n.title, n.label, n.nodeId) AS label,
-            n.fields AS fields, n.primaryIndex AS primaryIndex,
-            n.method AS method, n.path AS path, n.host AS host`,
-    { projectId, kinds: CONTRACT_NODE_KINDS },
-  );
-  return r.records.map((rec) => ({
-    nodeId: rec.get('nodeId'),
-    kind: rec.get('kind'),
-    name: rec.get('name') ?? null,
-    label: rec.get('label'),
-    fields: rec.get('fields') ?? null,
-    primaryIndex: rec.get('primaryIndex') ?? null,
-    method: rec.get('method') ?? null,
-    path: rec.get('path') ?? null,
-    host: rec.get('host') ?? null,
-  }));
+/**
+ * Read this project's contract-bearing nodes with their shape props. S1.4:
+ * one `queryByKind` (kind-index GSI) per contract kind, in place of the old
+ * `kind IN [...]` Cypher scan. `name`/`host` are not on the
+ * `SYSTEM_GRAPH_NODE_PROPS` allowlist (`lib/graph-store.mjs`) so they never
+ * round-trip through the store today — harmless here, `identityKey`/
+ * `contractShape` (contract-diff.mjs) already fall back to `label` for both.
+ */
+async function readProjectContracts(store, projectId) {
+  const out = [];
+  for (const kind of CONTRACT_NODE_KINDS) {
+    const nodes = await store.queryByKind(projectId, kind);
+    for (const n of nodes) {
+      out.push({
+        nodeId: n.nodeId,
+        kind: n.kind,
+        name: n.props?.name ?? null,
+        label: n.title ?? n.label ?? n.nodeId,
+        fields: n.props?.fields ?? null,
+        primaryIndex: n.props?.primaryIndex ?? null,
+        method: n.props?.method ?? null,
+        path: n.props?.path ?? null,
+        host: n.props?.host ?? null,
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -1634,67 +1571,52 @@ async function readProjectContracts(session, projectId) {
  * log with "everything is new". Fully non-blocking; never mutates contract-node
  * `status` (forbidden area).
  */
-async function processContractRevisions(config) {
+async function processContractRevisions(config, store) {
   const graphDir = join(config.knowledgeDir, '_graph');
   const snapPath = join(graphDir, 'contract-snapshot.json');
 
-  let driver;
   try {
-    driver = createDriver();
-    const session = driver.session();
+    const after = await readProjectContracts(store, config.project);
+
+    // Load the previous snapshot ("before"); first run → baseline only.
+    let before = null;
     try {
-      const after = await readProjectContracts(session, config.project);
-
-      // Load the previous snapshot ("before"); first run → baseline only.
-      let before = null;
-      try {
-        before = JSON.parse(await readFile(snapPath, 'utf-8')).contracts ?? [];
-      } catch {
-        before = null;
-      }
-
-      await mkdir(graphDir, { recursive: true });
-      const snapDoc = { projectId: config.project, generatedAt: new Date().toISOString(), contracts: after };
-      const stmp = snapPath + '.tmp';
-      await writeFile(stmp, JSON.stringify(snapDoc, null, 2), 'utf-8');
-      await rename(stmp, snapPath);
-
-      if (before === null) {
-        log(`Contract revisions: baseline recorded (${after.length} contract node(s)); no revisions on first run`);
-        return;
-      }
-
-      const diff = diffContracts(before, after);
-      if (diff.changes.length === 0) {
-        log('Contract revisions: no contract-shape changes this wave');
-        return;
-      }
-
-      const atCommit =
-        config.atCommit ?? (await headCommit(join(config.knowledgeDir, '..')));
-      const ts = new Date().toISOString();
-      const revisions = buildRevisions(diff, { atCommit, atWave: config.waveGate ?? null, ts }).map(
-        (rev) => ({ ...rev, projectId: config.project }),
-      );
-      const appended = await appendRevisions(session, revisions);
-      log(
-        `Contract revisions: appended ${appended.revisions} (${diff.added} new, ` +
-          `${diff.removed} removed, ${diff.modified} modified)` +
-          (config.waveGate ? ` at ${config.waveGate}` : ''),
-      );
-    } finally {
-      await session.close();
-      await driver.close();
+      before = JSON.parse(await readFile(snapPath, 'utf-8')).contracts ?? [];
+    } catch {
+      before = null;
     }
+
+    await mkdir(graphDir, { recursive: true });
+    const snapDoc = { projectId: config.project, generatedAt: new Date().toISOString(), contracts: after };
+    const stmp = snapPath + '.tmp';
+    await writeFile(stmp, JSON.stringify(snapDoc, null, 2), 'utf-8');
+    await rename(stmp, snapPath);
+
+    if (before === null) {
+      log(`Contract revisions: baseline recorded (${after.length} contract node(s)); no revisions on first run`);
+      return;
+    }
+
+    const diff = diffContracts(before, after);
+    if (diff.changes.length === 0) {
+      log('Contract revisions: no contract-shape changes this wave');
+      return;
+    }
+
+    const atCommit =
+      config.atCommit ?? (await headCommit(join(config.knowledgeDir, '..')));
+    const ts = new Date().toISOString();
+    const revisions = buildRevisions(diff, { atCommit, atWave: config.waveGate ?? null, ts }).map(
+      (rev) => ({ ...rev, projectId: config.project }),
+    );
+    const appended = await appendRevisions(store, revisions);
+    log(
+      `Contract revisions: appended ${appended.revisions} (${diff.added} new, ` +
+        `${diff.removed} removed, ${diff.modified} modified)` +
+        (config.waveGate ? ` at ${config.waveGate}` : ''),
+    );
   } catch (err) {
     logError(`contract-revision pass failed (non-blocking): ${err.message}`);
-    if (driver) {
-      try {
-        await driver.close();
-      } catch {
-        /* already closed */
-      }
-    }
   }
 }
 
@@ -1710,9 +1632,15 @@ async function processContractRevisions(config) {
  *   5.3  Capability coverage gaps — flag components touching a shared contract
  *        with no capability tag → `knowledge/_graph/capability-gaps.json` (W8).
  *
- * Fully non-blocking: any infra/Memgraph error is logged and skipped.
+ * Fully non-blocking: any store/Memgraph error is logged and skipped.
+ *
+ * S1.4: step 5.1 (`lib/federation.mjs`, in this story's file scope) runs on
+ * the GraphStore. Steps 5.2/5.3 (`lib/capability.mjs`) are NOT yet converted
+ * (out of S1.4's file scope) — they keep the legacy Memgraph seam until a
+ * follow-on story converts that lib file, mirroring the seam pattern already
+ * used elsewhere in this file for not-yet-converted passes.
  */
-async function processFederation(config) {
+async function processFederation(config, store) {
   if (!config.global) return;
   const graphDir = join(config.knowledgeDir, '_graph');
 
@@ -1725,21 +1653,31 @@ async function processFederation(config) {
     log(`Federation: using default strategy 'resource-identity' (${err.message})`);
   }
 
+  try {
+    // 5.1 — federate contract spine (lib/federation.mjs, S1.4). See that
+    // module's doc comment: true cross-project federation needs a
+    // projects-enumeration capability the project-partitioned GraphStore
+    // doesn't expose, so this is scoped to THIS project until that lands.
+    const projects = await readContracts(store, [config.project]);
+    const result = federateContracts(projects, { strategy });
+    const fed = await writeFederation(store, result);
+    log(
+      `Federation [${strategy}]: ${fed.contractNodes} shared contract node(s), ` +
+        `${fed.consumes} CONSUMES_CONTRACT edge(s) across ${projects.length} project(s)` +
+        (result.unjoinable.length ? `; ${result.unjoinable.length} unjoinable` : ''),
+    );
+  } catch (err) {
+    logError(`federation pass failed (non-blocking): ${err.message}`);
+  }
+
+  // 5.2/5.3 — capability ingest + coverage gaps (lib/capability.mjs). NOT
+  // converted by S1.4 (out of file scope) — legacy Memgraph seam, wrapped
+  // independently so a dead/absent Memgraph never blocks 5.1 above.
   let driver;
   try {
     driver = createDriver();
     const session = driver.session();
     try {
-      // 5.1 — federate contract spine
-      const projects = await readContracts(session);
-      const result = federateContracts(projects, { strategy });
-      const fed = await writeFederation(session, result);
-      log(
-        `Federation [${strategy}]: ${fed.contractNodes} shared contract node(s), ` +
-          `${fed.consumes} CONSUMES_CONTRACT edge(s) across ${projects.length} project(s)` +
-          (result.unjoinable.length ? `; ${result.unjoinable.length} unjoinable` : ''),
-      );
-
       // 5.2 — capability ingest (curated seed)
       try {
         const seedRaw = await readFile(join(graphDir, 'capabilities.json'), 'utf-8');
@@ -1769,7 +1707,7 @@ async function processFederation(config) {
       await driver.close();
     }
   } catch (err) {
-    logError(`federation pass failed (non-blocking): ${err.message}`);
+    logError(`capability pass failed (non-blocking): ${err.message}`);
     if (driver) {
       try {
         await driver.close();
@@ -1789,6 +1727,13 @@ async function processFederation(config) {
  *
  * Trigger: wave-gate (default, when `--wave-gate` is set) or drift-threshold.
  * Fully non-blocking; needs ≥2 federated subgraphs + capability seed to emit.
+ *
+ * S1.4 NOTE: every graph read/write in this pass routes through
+ * `propagator.mjs` (`readRecentChanges`/`perSiblingDrift`/`applyMarkerUpdate`),
+ * which is a DIFFERENT file from this story's `lib/impact-propagation.mjs` and
+ * is NOT in S1.4's file scope — it stays on the legacy Memgraph session until a
+ * follow-on story converts it. Left as-is here (a `store` param would be dead
+ * weight until that conversion lands).
  */
 async function processPropagator(config) {
   if (!config.global) return;
@@ -1899,117 +1844,113 @@ async function processPropagator(config) {
  * graph. Embeddings are intentionally NOT included — the snapshot is for
  * visualization, not search (search lives in graph-search.mjs).
  *
+ * S1.3 (EU migration): the two Cypher reads (`MATCH (n:Node {projectId})`,
+ * `MATCH (a)-[r]->(b)`) are replaced by `store.listNodes`/`store.listEdges`
+ * (project-index GSI on the edges table). The projection below reproduces the
+ * exact legacy field set — including the per-kind (`function`/`class`) shaping
+ * and `similarTo` — from the GraphStore's public node/edge shape, so downstream
+ * consumers (the Graph tab, `readSnapshotStats`) see byte-compatible output.
+ * Wiki/AST-authored fields (`type`, `phase`, `summary`, `tags`, `createdByStory`,
+ * `lastMutatedByStory`, `name`, `parentFile`, `line`, `endLine`, `exported`,
+ * `params`, `className`, `fnKind`, `extends`) live under `node.props` — they
+ * round-trip once the `SYSTEM_GRAPH_NODE_PROPS` allowlist (`lib/graph-store.mjs`)
+ * carries them; until then `props` simply omits the not-yet-allowlisted keys and
+ * this projection degrades gracefully (`?? null` / `?? []` / `?? 0`), matching
+ * how the old Cypher `RETURN` also nulled out an absent property.
+ *
  * Non-blocking: errors are logged but do not fail compile-sync.
  */
-async function writeGraphSnapshot(config) {
+async function writeGraphSnapshot(config, store) {
   try {
-    const driver = createDriver();
-    const session = driver.session();
-    try {
-      const nodeResult = await session.run(
-        `MATCH (n:Node {projectId: $projectId})
-         RETURN n.nodeId AS id, n.type AS type, n.phase AS phase, n.status AS status,
-                n.title AS title, n.summary AS summary, n.maturity AS maturity, n.tags AS tags,
-                n.createdByStory AS createdByStory, n.lastMutatedByStory AS lastMutatedByStory,
-                n.updated AS updated,
-                coalesce(n.kind, 'file') AS kind,
-                n.name AS astName, n.parentFile AS parentFile,
-                n.line AS line, n.endLine AS endLine, n.exported AS exported,
-                n.params AS params, n.className AS className,
-                n.fnKind AS fnKind, n.extends AS extendsName,
-                n.embedding AS embedding`,
-        { projectId: config.project }
-      );
+    const [nodeRows, edgeRows] = await Promise.all([
+      store.listNodes(config.project),
+      store.listEdges(config.project),
+    ]);
 
-      // Semantic neighbours from the Voyage embeddings (raw vectors stay out of
-      // the snapshot). Bounded cost; empty for large graphs / no-embedding nodes.
-      const similarTo = computeSimilarTo(
-        nodeResult.records.map((rec) => ({ id: rec.get('id'), embedding: rec.get('embedding') })),
-      );
-      const edgeResult = await session.run(
-        `MATCH (a:Node {projectId: $projectId})-[r]->(b:Node {projectId: $projectId})
-         RETURN a.nodeId AS source, b.nodeId AS target, type(r) AS type, r.weight AS weight`,
-        { projectId: config.project }
-      );
+    // Semantic neighbours from the Voyage embeddings (raw vectors stay out of
+    // the snapshot). Bounded cost; empty for large graphs / no-embedding nodes.
+    // Node embeddings are not (yet) part of the GraphStore's public shape — the
+    // sidecar that carries them is S1.5's seam — so this yields an empty map
+    // until that lands, same as if every node had no embedding.
+    const similarTo = computeSimilarTo(
+      nodeRows.map((n) => ({ id: n.nodeId, embedding: n.embedding ?? null })),
+    );
 
-      const toNum = (v) =>
-        v && typeof v.toNumber === 'function' ? v.toNumber() : v ?? null;
+    const toNum = (v) =>
+      v && typeof v.toNumber === 'function' ? v.toNumber() : v ?? null;
 
-      const nodes = nodeResult.records.map((rec) => {
-        const kind = rec.get('kind') ?? 'file';
-        const base = {
-          id: rec.get('id'),
-          kind,
-          type: rec.get('type'),
-          phase: rec.get('phase'),
-          status: rec.get('status'),
-          title: rec.get('title'),
-          summary: rec.get('summary'),
-          maturity: toNum(rec.get('maturity')) ?? 0,
-          tags: rec.get('tags') ?? [],
-          createdByStory: rec.get('createdByStory') ?? null,
-          lastMutatedByStory: rec.get('lastMutatedByStory') ?? null,
-          updated: rec.get('updated') ?? null,
-          similarTo: similarTo.get(rec.get('id')) ?? [],
-        };
-        // Surface AST-specific fields only when present, so wiki-only nodes
-        // don't carry empty/null clutter that bloats the snapshot.
-        if (kind === 'function') {
-          return {
-            ...base,
-            name: rec.get('astName'),
-            parentFile: rec.get('parentFile'),
-            line: toNum(rec.get('line')) ?? 0,
-            endLine: toNum(rec.get('endLine')) ?? 0,
-            exported: rec.get('exported') ?? false,
-            params: rec.get('params') ?? [],
-            className: rec.get('className') || null,
-            fnKind: rec.get('fnKind') || 'function',
-          };
-        }
-        if (kind === 'class') {
-          return {
-            ...base,
-            name: rec.get('astName'),
-            parentFile: rec.get('parentFile'),
-            line: toNum(rec.get('line')) ?? 0,
-            endLine: toNum(rec.get('endLine')) ?? 0,
-            extends: rec.get('extendsName') || null,
-          };
-        }
-        return base;
-      });
-
-      const edges = edgeResult.records.map((rec) => ({
-        source: rec.get('source'),
-        target: rec.get('target'),
-        type: rec.get('type'),
-        weight: toNum(rec.get('weight')) ?? 1.0,
-      }));
-
-      const snapshot = {
-        projectId: config.project,
-        generatedAt: new Date().toISOString(),
-        nodeCount: nodes.length,
-        edgeCount: edges.length,
-        nodes,
-        edges,
+    const nodes = nodeRows.map((n) => {
+      const kind = n.kind ?? 'file';
+      const props = n.props ?? {};
+      const base = {
+        id: n.nodeId,
+        kind,
+        type: props.type ?? null,
+        phase: props.phase ?? null,
+        status: n.status ?? null,
+        title: n.title ?? null,
+        summary: props.summary ?? null,
+        maturity: toNum(props.maturity) ?? 0,
+        tags: props.tags ?? [],
+        createdByStory: props.createdByStory ?? null,
+        lastMutatedByStory: props.lastMutatedByStory ?? null,
+        updated: n.updated ?? null,
+        similarTo: similarTo.get(n.nodeId) ?? [],
       };
+      // Surface AST-specific fields only when present, so wiki-only nodes
+      // don't carry empty/null clutter that bloats the snapshot.
+      if (kind === 'function') {
+        return {
+          ...base,
+          name: props.name ?? null,
+          parentFile: props.parentFile ?? null,
+          line: toNum(props.line) ?? 0,
+          endLine: toNum(props.endLine) ?? 0,
+          exported: props.exported ?? false,
+          params: props.params ?? [],
+          className: props.className || null,
+          fnKind: props.fnKind || 'function',
+        };
+      }
+      if (kind === 'class') {
+        return {
+          ...base,
+          name: props.name ?? null,
+          parentFile: props.parentFile ?? null,
+          line: toNum(props.line) ?? 0,
+          endLine: toNum(props.endLine) ?? 0,
+          extends: props.extends || null,
+        };
+      }
+      return base;
+    });
 
-      const snapshotDir = join(config.knowledgeDir, '_graph');
-      await mkdir(snapshotDir, { recursive: true });
-      const snapshotPath = join(snapshotDir, 'graph-snapshot.json');
-      const tmpPath = snapshotPath + '.tmp';
-      await writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf-8');
-      await rename(tmpPath, snapshotPath);
+    const edges = edgeRows.map((e) => ({
+      source: e.from,
+      target: e.to,
+      type: e.type,
+      weight: toNum(e.props?.weight) ?? 1.0,
+    }));
 
-      log(
-        `Wrote graph snapshot: ${nodes.length} nodes, ${edges.length} edges → _graph/graph-snapshot.json`
-      );
-    } finally {
-      await session.close();
-      await driver.close();
-    }
+    const snapshot = {
+      projectId: config.project,
+      generatedAt: new Date().toISOString(),
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      nodes,
+      edges,
+    };
+
+    const snapshotDir = join(config.knowledgeDir, '_graph');
+    await mkdir(snapshotDir, { recursive: true });
+    const snapshotPath = join(snapshotDir, 'graph-snapshot.json');
+    const tmpPath = snapshotPath + '.tmp';
+    await writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf-8');
+    await rename(tmpPath, snapshotPath);
+
+    log(
+      `Wrote graph snapshot: ${nodes.length} nodes, ${edges.length} edges → _graph/graph-snapshot.json`
+    );
   } catch (err) {
     logError(`graph-snapshot write failed (non-blocking): ${err.message}`);
   }
