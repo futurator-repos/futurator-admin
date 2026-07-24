@@ -36,8 +36,8 @@ const sections: NavSection[] = [
     items: [
       { href: '/development/files', label: 'File Explorer', icon: '📂' },
       { href: '/development/apps', label: 'Apps', icon: '🚀' },
-      { href: '/development/monitor', label: 'EC2 Monitor', icon: '📊' },
-      { href: '/development/queues', label: 'Queues', icon: '🧵' },
+      // EC2 Monitor + Queues folded into Servers as the Dashboard + Queue tabs.
+      // Their old routes redirect (?tab=dashboard / ?tab=queue) for bookmarks.
       { href: '/development/servers', label: 'Servers', icon: '🖥️' },
       { href: '/development/agentic-office', label: 'Agentic Office', icon: '🏢' },
       { href: '/development/graph', label: 'Graph', icon: '🕸️' },

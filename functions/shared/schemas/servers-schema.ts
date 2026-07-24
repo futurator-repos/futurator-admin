@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 const providerIds = ['hetzner', 'oracle', 'gcp', 'aws', 'local'] as const;
 
+const serverCapabilities = ['browser', 'docker', 'graph', 'git-push', 'interactive'] as const;
+
 export const createServerSchema = z.object({
   name: z.string().min(1).max(64),
   provider: z.enum(providerIds),
@@ -19,12 +21,26 @@ export const updateServerSchema = z.object({
   enabled: z.boolean().optional(),
   maxConcurrent: z.number().int().min(1).max(16).optional(),
   costPerHour: z.number().min(0).optional(),
+  // Operator override of the daemon-self-reported capability matrix.
+  capabilities: z.array(z.enum(serverCapabilities)).optional(),
+});
+
+// One band of the JOB-priority ranking (which job goes first) — a different
+// axis from host selection (mode/priorityOrder/weights). Ordered highest-first.
+const jobPriorityTierSchema = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(64),
+  jobTypes: z.array(z.string().min(1).max(64)),
 });
 
 export const dispatchPolicySchema = z.object({
   mode: z.enum(['priority', 'weighted', 'cheapest']),
   priorityOrder: z.array(z.string()),
   weights: z.record(z.string(), z.number().min(0).max(100)),
+  // Optional job-priority tiers; undefined falls back to DEFAULT_JOB_PRIORITY_TIERS
+  // at selection time. Persisted through the same policy row (dispatch-state.ts
+  // JSON-stringifies the whole object and re-validates on read).
+  jobPriority: z.array(jobPriorityTierSchema).optional(),
 });
 
 const credentialShapes = {

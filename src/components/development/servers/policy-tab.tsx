@@ -12,6 +12,10 @@ import {
   useSetDispatchServerAware,
 } from '@/hooks/use-servers';
 import type { ComputeServer, DispatchMode } from '@/types/servers';
+import {
+  DEFAULT_JOB_PRIORITY_TIERS,
+  type JobPriorityTier,
+} from '../../../../functions/shared/types/compute-server';
 import { AssignmentsFeed } from './assignments-feed';
 
 /** Server-aware dispatch on/off (spec §5's master gate). ON hands new jobs to
@@ -253,6 +257,79 @@ function CheapestPreview({ servers }: { servers: ComputeServer[] }) {
   );
 }
 
+/** Job-priority editor: an ordered list of tiers (highest-priority first),
+ * reordered with ↑/↓. This is a DIFFERENT axis from the host-selection modes
+ * above — it decides WHICH JOB a free slot picks, not WHICH SERVER runs it.
+ * Reordering tiers / moving jobTypes between tiers is a future nicety; today the
+ * operator sets the band order and it persists through the same policy PUT. */
+function JobPriorityEditor({
+  tiers,
+  onChange,
+}: {
+  tiers: JobPriorityTier[];
+  onChange: (next: JobPriorityTier[]) => void;
+}) {
+  if (tiers.length === 0) {
+    return <p className="text-sm text-muted-foreground">No job-priority tiers configured.</p>;
+  }
+  return (
+    <ol className="space-y-1.5">
+      {tiers.map((tier, i) => (
+        <li
+          key={tier.id}
+          className="flex items-start justify-between gap-2 rounded-md border border-border px-3 py-2 text-sm"
+        >
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-xs text-muted-foreground">{i + 1}.</span>
+              <span className="font-medium">{tier.label}</span>
+            </span>
+            <span className="flex flex-wrap gap-1">
+              {tier.jobTypes.length === 0 ? (
+                <span className="text-xs text-muted-foreground">(no job types)</span>
+              ) : (
+                tier.jobTypes.map((jt) => (
+                  <span
+                    key={jt}
+                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+                  >
+                    {jt}
+                  </span>
+                ))
+              )}
+              {i === tiers.length - 1 && (
+                <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] italic text-muted-foreground">
+                  + everything else
+                </span>
+              )}
+            </span>
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <Button
+              variant="outline"
+              size="icon-xs"
+              disabled={i === 0}
+              aria-label={`Move ${tier.label} up`}
+              onClick={() => onChange(moveItem(tiers, i, i - 1))}
+            >
+              ↑
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-xs"
+              disabled={i === tiers.length - 1}
+              aria-label={`Move ${tier.label} down`}
+              onClick={() => onChange(moveItem(tiers, i, i + 1))}
+            >
+              ↓
+            </Button>
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 export function PolicyTab() {
   const { data, isLoading, error } = useDispatchPolicy();
   const { data: serversData } = useServers();
@@ -265,6 +342,11 @@ export function PolicyTab() {
   const [mode, setMode] = useState<DispatchMode>('priority');
   const [priorityOrder, setPriorityOrder] = useState<string[]>([]);
   const [weights, setWeights] = useState<Record<string, number>>({});
+  // Job-priority tiers live on a DIFFERENT axis from host selection. The client
+  // DispatchPolicy type does not carry `jobPriority` (it round-trips as an
+  // opaque extra field through the policy row), so read it via a narrow cast and
+  // seed from the operator default when the stored policy has none.
+  const [jobPriority, setJobPriority] = useState<JobPriorityTier[]>(DEFAULT_JOB_PRIORITY_TIERS);
   const [hydrated, setHydrated] = useState(false);
 
   // Seed local editable state from the server once, on first load, so the
@@ -278,6 +360,8 @@ export function PolicyTab() {
     setMode(data.policy.mode);
     setPriorityOrder(data.policy.priorityOrder);
     setWeights(data.policy.weights);
+    const storedTiers = (data.policy as { jobPriority?: JobPriorityTier[] }).jobPriority;
+    if (storedTiers && storedTiers.length > 0) setJobPriority(storedTiers);
   }
 
   if (isLoading) {
@@ -292,7 +376,12 @@ export function PolicyTab() {
   }
 
   function handleSave() {
-    save.mutate({ mode, priorityOrder, weights });
+    // `jobPriority` isn't on SaveDispatchPolicyInput, but it round-trips as an
+    // extra field: the PUT body carries it, the (extended) dispatchPolicySchema
+    // validates it, and dispatch-state.ts persists the whole object. Built as a
+    // variable so structural typing allows the extra property.
+    const payload = { mode, priorityOrder, weights, jobPriority };
+    save.mutate(payload);
   }
 
   return (
@@ -322,19 +411,32 @@ export function PolicyTab() {
           )}
           {mode === 'cheapest' && <CheapestPreview servers={enabledServers} />}
         </div>
-
-        <div className="flex items-center gap-2">
-          <Button size="sm" onClick={handleSave} disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : 'Save policy'}
-          </Button>
-          {save.isSuccess && <span className="text-xs text-success">Saved — re-swept.</span>}
-          {save.isError && (
-            <span className="text-xs text-destructive">
-              Failed to save: {(save.error as Error).message}
-            </span>
-          )}
-        </div>
       </Card>
+
+      <Card className="space-y-4 p-4">
+        <div>
+          <h2 className="text-sm font-semibold">Job priority</h2>
+          <p className="text-xs text-muted-foreground">
+            When a host frees a slot and several eligible jobs are waiting, which one goes first. A
+            different axis from the mode above (that picks the <em>host</em>; this picks the{' '}
+            <em>job</em>). Ordered highest-priority first; ties within a tier run oldest-first.
+          </p>
+        </div>
+
+        <JobPriorityEditor tiers={jobPriority} onChange={setJobPriority} />
+      </Card>
+
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={handleSave} disabled={save.isPending}>
+          {save.isPending ? 'Saving…' : 'Save policy'}
+        </Button>
+        {save.isSuccess && <span className="text-xs text-success">Saved — re-swept.</span>}
+        {save.isError && (
+          <span className="text-xs text-destructive">
+            Failed to save: {(save.error as Error).message}
+          </span>
+        )}
+      </div>
 
       <div>
         <h2 className="text-sm font-semibold">Recent assignments</h2>

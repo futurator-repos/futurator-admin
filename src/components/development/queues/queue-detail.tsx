@@ -4,17 +4,10 @@ import { useQueueRequest, useRespondQueueRequest } from '@/hooks/use-queue-reque
 import { useAgentEvents } from '@/hooks/use-agent-events';
 import { useAgentJob } from '@/hooks/use-agent-job';
 import { useServers } from '@/hooks/use-servers';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { StatusLozenge } from './status-legend';
 import type { AgentJobStatus } from '@/types/agent-orchestrator';
 import type { QueueRequest, QueueRequestStatus } from '@/types/queue';
-
-const STATUS_STYLES: Record<QueueRequestStatus, string> = {
-  RECEIVED: 'bg-slate-500/15 text-slate-400',
-  QUEUED: 'bg-amber-500/15 text-amber-400',
-  RUNNING: 'bg-blue-500/15 text-blue-400',
-  COMPLETED: 'bg-green-500/15 text-green-400',
-  FAILED: 'bg-red-500/15 text-red-400',
-  RESPONDED: 'bg-emerald-500/15 text-emerald-400',
-};
 
 /** Map the queue-request status onto the AgentJobStatus the events poller reads. */
 function toJobStatus(s: QueueRequestStatus | undefined): AgentJobStatus | undefined {
@@ -23,14 +16,6 @@ function toJobStatus(s: QueueRequestStatus | undefined): AgentJobStatus | undefi
   if (s === 'FAILED') return 'FAILED';
   if (s === 'COMPLETED' || s === 'RESPONDED') return 'COMPLETED';
   return 'PENDING';
-}
-
-export function StatusBadge({ status }: { status: QueueRequestStatus }) {
-  return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${STATUS_STYLES[status]}`}>
-      {status}
-    </span>
-  );
 }
 
 /** One rendered line of the live terminal, derived from an agent-event row. */
@@ -236,88 +221,90 @@ export function QueueDetail({ requestId }: { requestId: string }) {
   const dispatcherHost = req.response?.dispatcher?.host;
 
   return (
-    <div className="space-y-4">
-      {/* Metadata card — the socket-tester detail */}
-      <div className="rounded-md border border-border p-3 space-y-1.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <StatusBadge status={req.status} />
-            <span className="text-xs font-medium">{req.source}</span>
-            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase">
-              {req.target}
-            </span>
-          </div>
-          <span className="font-mono text-[10px] text-muted-foreground">{req.requestId}</span>
-        </div>
-        <MetaRow label="Created" value={new Date(req.createdAt).toLocaleString()} />
-        {req.startedAt && (
-          <MetaRow label="Started" value={new Date(req.startedAt).toLocaleTimeString()} />
-        )}
-        {req.completedAt && (
-          <MetaRow label="Completed" value={new Date(req.completedAt).toLocaleTimeString()} />
-        )}
-        <MetaRow label="Receiver" value={req.receiver ?? '—'} />
-        <MetaRow label="Callback" value={req.callbackUrl ?? '—'} />
-        <MetaRow label="Job" value={req.jobId ?? '—'} />
-        <MetaRow
-          label="Machine"
-          value={
-            job?.assignedServerId || dispatcherHost ? (
-              <span className="inline-flex items-center gap-2">
-                {job?.assignedServerId && (
-                  <span title={job.assignReason}>
-                    {serverNameById.get(job.assignedServerId) ?? job.assignedServerId}
-                  </span>
-                )}
-                {dispatcherHost && (
-                  <span className="font-mono text-[10px] text-muted-foreground">
-                    ({dispatcherHost})
-                  </span>
-                )}
+    <TooltipProvider>
+      <div className="space-y-4">
+        {/* Metadata card — the socket-tester detail */}
+        <div className="rounded-md border border-border p-3 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <StatusLozenge status={req.status} />
+              <span className="text-xs font-medium">{req.source}</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase">
+                {req.target}
               </span>
-            ) : (
-              '—'
-            )
-          }
-        />
-        <MetaRow
-          label="Prompt"
-          value={<span className="text-muted-foreground">{req.prompt.slice(0, 400)}</span>}
-        />
-        {req.error && (
-          <MetaRow label="Error" value={<span className="text-red-400">{req.error}</span>} />
+            </div>
+            <span className="font-mono text-[10px] text-muted-foreground">{req.requestId}</span>
+          </div>
+          <MetaRow label="Created" value={new Date(req.createdAt).toLocaleString()} />
+          {req.startedAt && (
+            <MetaRow label="Started" value={new Date(req.startedAt).toLocaleTimeString()} />
+          )}
+          {req.completedAt && (
+            <MetaRow label="Completed" value={new Date(req.completedAt).toLocaleTimeString()} />
+          )}
+          <MetaRow label="Receiver" value={req.receiver ?? '—'} />
+          <MetaRow label="Callback" value={req.callbackUrl ?? '—'} />
+          <MetaRow label="Job" value={req.jobId ?? '—'} />
+          <MetaRow
+            label="Machine"
+            value={
+              job?.assignedServerId || dispatcherHost ? (
+                <span className="inline-flex items-center gap-2">
+                  {job?.assignedServerId && (
+                    <span title={job.assignReason}>
+                      {serverNameById.get(job.assignedServerId) ?? job.assignedServerId}
+                    </span>
+                  )}
+                  {dispatcherHost && (
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      ({dispatcherHost})
+                    </span>
+                  )}
+                </span>
+              ) : (
+                '—'
+              )
+            }
+          />
+          <MetaRow
+            label="Prompt"
+            value={<span className="text-muted-foreground">{req.prompt.slice(0, 400)}</span>}
+          />
+          {req.error && (
+            <MetaRow label="Error" value={<span className="text-red-400">{req.error}</span>} />
+          )}
+        </div>
+
+        {/* Call / body inspector — raw request as received (ingest or dispatch) */}
+        <CallInspector req={req} />
+
+        {/* Live terminal */}
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium">Live terminal</span>
+          <LiveTerminal jobId={req.jobId ?? null} status={req.status} />
+        </div>
+
+        {/* Response */}
+        <ResponsePanel req={req} />
+
+        {/* Audit log */}
+        {req.audit?.length > 0 && (
+          <details>
+            <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+              Audit log ({req.audit.length})
+            </summary>
+            <div className="mt-1 space-y-0.5">
+              {req.audit.map((a, i) => (
+                <div key={i} className="flex gap-2 text-[10px] font-mono text-muted-foreground">
+                  <span>{new Date(a.at).toLocaleTimeString()}</span>
+                  <span className="text-foreground">{a.event}</span>
+                  <span>{a.detail}</span>
+                </div>
+              ))}
+            </div>
+          </details>
         )}
       </div>
-
-      {/* Call / body inspector — raw request as received (ingest or dispatch) */}
-      <CallInspector req={req} />
-
-      {/* Live terminal */}
-      <div className="space-y-1.5">
-        <span className="text-xs font-medium">Live terminal</span>
-        <LiveTerminal jobId={req.jobId ?? null} status={req.status} />
-      </div>
-
-      {/* Response */}
-      <ResponsePanel req={req} />
-
-      {/* Audit log */}
-      {req.audit?.length > 0 && (
-        <details>
-          <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
-            Audit log ({req.audit.length})
-          </summary>
-          <div className="mt-1 space-y-0.5">
-            {req.audit.map((a, i) => (
-              <div key={i} className="flex gap-2 text-[10px] font-mono text-muted-foreground">
-                <span>{new Date(a.at).toLocaleTimeString()}</span>
-                <span className="text-foreground">{a.event}</span>
-                <span>{a.detail}</span>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-    </div>
+    </TooltipProvider>
   );
 }

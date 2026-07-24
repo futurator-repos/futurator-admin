@@ -6,6 +6,30 @@
 
 export type ComputeProviderId = 'hetzner' | 'oracle' | 'gcp' | 'aws' | 'local';
 export type ServerServiceType = 'vm' | 'serverless' | 'local-machine';
+
+/**
+ * ServerCapability — a binary host attribute the dispatcher uses to decide
+ * whether a server may run a given job (a different axis from capacity/cost/
+ * liveness/auth). Daemon-self-reported at heartbeat; operator may override.
+ * Mirrors functions/shared/types/compute-server.ts.
+ */
+export type ServerCapability = 'browser' | 'docker' | 'graph' | 'git-push' | 'interactive';
+
+export const ALL_SERVER_CAPABILITIES: ServerCapability[] = [
+  'browser',
+  'docker',
+  'graph',
+  'git-push',
+  'interactive',
+];
+
+export const SERVER_CAPABILITY_LABELS: Record<ServerCapability, string> = {
+  browser: 'Browser/VQA (Chromium)',
+  docker: 'Docker',
+  graph: 'Knowledge graph',
+  'git-push': 'Git push (PAT)',
+  interactive: 'Interactive sessions',
+};
 export type ComputeServerStatus =
   | 'PROVISIONING'
   | 'BOOTSTRAPPING'
@@ -30,6 +54,9 @@ export interface ComputeServer {
   enabled: boolean;
   maxConcurrent: number;
   costPerHour: number;
+  /** Capability matrix — what this box can run. Daemon-reported; operator-overridable.
+   *  Undefined = not yet reported (matcher treats permissively). */
+  capabilities?: ServerCapability[];
   providerRef: { instanceId?: string; ip?: string; zone?: string; availabilityDomain?: string };
   iamUserName?: string;
   lastHeartbeatAt?: string;

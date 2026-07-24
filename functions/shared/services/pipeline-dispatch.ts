@@ -617,10 +617,7 @@ export function derivePipelineStage(plan: Plan, storyNodes: StoryNodeRow[]): Pip
     // app content. Reuses the existing `queued` stage (no new stage value).
     const heldBehind = (plan.sealProvenance as SealProvenance | undefined)?.heldBehind;
     if (heldBehind)
-      return view(
-        'queued',
-        `held — same-app predecessor '${heldBehind}' non-terminal (awaiting precedence release)`,
-      );
+      return view('queued', 'Deferred — waiting for an earlier plan of the same app to finish.');
 
     const nothingProduced =
       storyNodes.length === 0 &&
@@ -863,16 +860,16 @@ export async function handleDispatch(c: Context): Promise<Response> {
         isNewApp,
         idempotent,
         // C2 — honest admission status. A plan admitted behind a still-in-flight
-        // same-app predecessor is 'held' (created, but `concept` + generation
+        // same-app predecessor is 'deferred' (created, but `concept` + generation
         // deferred → reported as `queued`), never a silent concurrent developer.
         // Poll `statusUrl` for the live stage; `heldBehind` names the blocker.
         held,
         ...(heldBehind ? { heldBehind } : {}),
         statusUrl: `/api/pipeline/runs/${runId}`,
-        status: held ? 'held' : 'accepted',
+        status: held ? 'deferred' : 'accepted',
       },
-      // 202 for a fresh dispatch (held or not); 200 when the seal was already
-      // dispatched. A held plan is still accepted — the caller can retry the
+      // 202 for a fresh dispatch (deferred or not); 200 when the seal was already
+      // dispatched. A deferred plan is still accepted — the caller can retry the
       // status poll rather than being refused with a 409.
       idempotent ? 200 : 202,
     );

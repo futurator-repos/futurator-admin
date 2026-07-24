@@ -511,6 +511,16 @@ export interface AgentJob {
     // under its own FUTURATOR_BROWSE_ROOT and writes back `fileBrowseResult`.
     // Payload: `fileBrowsePayload` (both below).
     | 'file-browse';
+
+  /**
+   * Dispatch capability matrix — DYNAMIC per-job capability requirements layered
+   * on top of the static jobType map (dispatch-capabilities.ts). Set at dispatch
+   * time when the job's payload demands a capability the jobType doesn't always
+   * need — e.g. a `story-dev` job whose story carries browser acceptance criteria
+   * stamps `['browser']` so only Chromium-capable hosts claim it. Consumed by
+   * `serverHasCapabilitiesFor()` (eligibility axis 1).
+   */
+  requiredCapabilities?: import('./compute-server').ServerCapability[];
   partyBootstrapPayload?: {
     projectId: string;
     projectPath: string;
