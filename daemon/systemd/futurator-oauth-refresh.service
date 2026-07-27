@@ -1,0 +1,16 @@
+# futurator-oauth-refresh.service — periodic Claude OAuth token refresh (oneshot).
+# Pairs with futurator-oauth-refresh.timer. Runs daemon/scripts/oauth-refresh.sh
+# as ubuntu, re-pulling fresh Max-subscription tokens from the admin relay so a
+# long-lived fleet box never lets its Claude auth expire.
+[Unit]
+Description=Futurator daemon Claude OAuth token refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=HOME=/home/ubuntu
+EnvironmentFile=/etc/futurator/daemon.env
+ExecStart=/opt/futurator/daemon/scripts/oauth-refresh.sh
+Nice=10

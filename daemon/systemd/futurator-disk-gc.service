@@ -4,10 +4,10 @@
 # Pairs with futurator-disk-gc.timer. Runs daemon/scripts/disk-gc.sh as ubuntu.
 #
 # Install (one-time, on EC2 i-0826d68c316ae97dd):
-#   sudo cp /opt/futurator-daemon/scripts/disk-gc.sh /opt/futurator-daemon/scripts/disk-gc.sh
-#   chmod +x /opt/futurator-daemon/scripts/disk-gc.sh
-#   sudo cp /opt/futurator-daemon/systemd/futurator-disk-gc.service /etc/systemd/system/
-#   sudo cp /opt/futurator-daemon/systemd/futurator-disk-gc.timer   /etc/systemd/system/
+#   sudo cp /opt/futurator/daemon/scripts/disk-gc.sh /opt/futurator/daemon/scripts/disk-gc.sh
+#   chmod +x /opt/futurator/daemon/scripts/disk-gc.sh
+#   sudo cp /opt/futurator/daemon/systemd/futurator-disk-gc.service /etc/systemd/system/
+#   sudo cp /opt/futurator/daemon/systemd/futurator-disk-gc.timer   /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now futurator-disk-gc.timer
 #   # verify:   systemctl list-timers futurator-disk-gc.timer
@@ -20,6 +20,6 @@ After=network.target
 [Service]
 Type=oneshot
 User=ubuntu
-ExecStart=/opt/futurator-daemon/scripts/disk-gc.sh
+ExecStart=/opt/futurator/daemon/scripts/disk-gc.sh
 Nice=10
 IOSchedulingClass=idle

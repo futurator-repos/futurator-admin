@@ -1,0 +1,15 @@
+# futurator-oauth-refresh.timer — re-pull fresh Claude OAuth every 3h (+ shortly
+# after boot). Claude Max access tokens are short-lived; a boot-only fetch lets
+# a multi-day fleet box's auth expire and wedges every Claude step.
+[Unit]
+Description=Refresh Futurator daemon Claude OAuth periodically
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=3h
+Persistent=true
+RandomizedDelaySec=5min
+Unit=futurator-oauth-refresh.service
+
+[Install]
+WantedBy=timers.target

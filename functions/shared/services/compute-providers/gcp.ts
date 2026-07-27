@@ -92,7 +92,11 @@ async function provision(spec: ProvisionSpec): Promise<ProviderRef> {
         {
           boot: true,
           autoDelete: true,
-          initializeParams: { sourceImage: UBUNTU_IMAGE },
+          // 40 GB, not the image default (~10 GB): a dev-pipeline box clones
+          // repos + `npm install`s several apps + holds a Playwright Chromium;
+          // 10 GB fills mid-build and every clone/install dies "No space left
+          // on device" (2026-07-27 incident). Paired with the disk-gc timer.
+          initializeParams: { sourceImage: UBUNTU_IMAGE, diskSizeGb: '40' },
         },
       ],
       networkInterfaces: [{ network: 'global/networks/default', accessConfigs: [{}] }],

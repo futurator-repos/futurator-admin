@@ -8,7 +8,10 @@
 Description=Weekly timer for Futurator daemon disk garbage-collection
 
 [Timer]
-OnCalendar=weekly
+# DAILY, not weekly (2026-07-27): an 8.7 GB box filled between weekly runs and
+# wedged every build. Even on the 40 GB boxes, daily GC keeps npm/.cache/stale
+# worktree cruft from creeping up. Chromium is preserved by disk-gc.sh.
+OnCalendar=daily
 Persistent=true
 RandomizedDelaySec=15min
 Unit=futurator-disk-gc.service

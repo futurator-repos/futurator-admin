@@ -118,11 +118,24 @@ WorkingDirectory=/opt/futurator/daemon
 [Install]
 WantedBy=multi-user.target
 UNITEOF
+
+# ── Fleet-box self-maintenance timers (2026-07-27 incident: one box hit disk-full
+# + expired-OAuth in a day and wedged every build). Units ship in the synced
+# bundle with correct /opt/futurator/daemon paths. Idempotent on every re-boot.
+#   • disk-gc      — DAILY GC of npm/.cache/stale-worktree cruft (Chromium kept).
+#   • oauth-refresh— re-pull fresh Claude Max tokens every 3h (boot fetch expires).
+chmod +x /opt/futurator/daemon/scripts/disk-gc.sh /opt/futurator/daemon/scripts/oauth-refresh.sh 2>/dev/null || true
+cp /opt/futurator/daemon/systemd/futurator-disk-gc.service       /etc/systemd/system/ || true
+cp /opt/futurator/daemon/systemd/futurator-disk-gc.timer         /etc/systemd/system/ || true
+cp /opt/futurator/daemon/systemd/futurator-oauth-refresh.service /etc/systemd/system/ || true
+cp /opt/futurator/daemon/systemd/futurator-oauth-refresh.timer   /etc/systemd/system/ || true
+
 # "enable --now" starts the unit only if it is stopped, so on a re-run it would
 # leave the OLD process serving while the synced code sits unused on disk.
 # restart always adopts what we just pulled.
 systemctl daemon-reload
 systemctl enable futurator-daemon
+systemctl enable --now futurator-disk-gc.timer futurator-oauth-refresh.timer || true
 systemctl restart futurator-daemon
 `;
 }
